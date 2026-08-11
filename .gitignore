@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.local
+.DS_Store
+dist/
+npm-debug.log*
+# Never commit real credentials or generated keys
+*.key
+# Runtime data — page history, backups, usage stats from connected sites
+backend/data/
+backend/backups/
