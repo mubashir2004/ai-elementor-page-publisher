@@ -150,7 +150,7 @@ function sampleImagesForCritique(images, max = 12) {
 
 async function runPipeline(params, onStage = () => {}) {
   const {
-    creds, claudeKey, claudeModel, mode = 'new', pageId,
+    creds, claudeKey, claudeModel, claudeUseCli = false, mode = 'new', pageId,
     prompt, images = [], template = 'canvas', title,
     status = 'draft', sideloadImages = true,
     allowPro = false, brandContext = '', brandKit = null,
@@ -200,7 +200,7 @@ async function runPipeline(params, onStage = () => {}) {
   effectivePrompt = (effectivePrompt || '') +
     (HEADER_DIRECTIVES[includeHeader] || HEADER_DIRECTIVES.none);
 
-  const claude = createClaudeClient(claudeKey, claudeModel);
+  const claude = createClaudeClient(claudeKey, claudeModel, { useCli: claudeUseCli });
   const site = wpClient.normalizeSite(creds.wpUrl);
 
   // -------- PASS 1: design system (only if images uploaded) --------

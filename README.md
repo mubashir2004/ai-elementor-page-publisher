@@ -37,7 +37,7 @@ All WordPress and Claude calls are server-side; the browser never holds credenti
 
 ## Getting started
 
-Prerequisites: Node 20+, a WordPress site with Elementor (Pro optional), a Claude API key.
+Prerequisites: Node 20+, a WordPress site with Elementor (Pro optional), and Claude access — either a Claude API key **or** the [Claude Code CLI](https://claude.com/claude-code) installed and signed in (`npm install -g @anthropic-ai/claude-code`, then run `claude` once). Pick the mode on the Connect screen under **Claude access**.
 
 ```bash
 # 1. Backend (terminal 1)

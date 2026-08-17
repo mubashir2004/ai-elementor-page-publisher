@@ -32,6 +32,7 @@ export default function ConnectScreen({ onConnected }) {
     wpUrl: '', wpUser: '', wpAppPassword: '', claudeKey: '', claudeModel: MODELS[0],
   });
   const [show, setShow] = useState({ pw: false, key: false });
+  const [claudeMode, setClaudeMode] = useState('api'); // 'api' | 'cli'
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -58,7 +59,8 @@ export default function ConnectScreen({ onConnected }) {
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const allGreen = result &&
-    result.wpReachable && result.authValid && result.pluginInstalled && result.elementorActive;
+    result.wpReachable && result.authValid && result.pluginInstalled && result.elementorActive &&
+    (claudeMode !== 'cli' || result.claudeCli);
 
   async function handleTest() {
     setErr('');
@@ -67,13 +69,13 @@ export default function ConnectScreen({ onConnected }) {
       setErr('Site URL must start with https://');
       return;
     }
-    if (!form.wpUser || !form.wpAppPassword || !form.claudeKey) {
+    if (!form.wpUser || !form.wpAppPassword || (claudeMode === 'api' && !form.claudeKey)) {
       setErr('All fields are required.');
       return;
     }
     setBusy(true);
     try {
-      const r = await testConnection({ ...form, unsplashKey, geminiKey, brandContext });
+      const r = await testConnection({ ...form, claudeMode, unsplashKey, geminiKey, brandContext });
       setResult(r);
       // Default the widget-mode toggle to whatever the site supports.
       setAllowPro(!!r.elementorPro);
@@ -87,6 +89,7 @@ export default function ConnectScreen({ onConnected }) {
   function handleContinue() {
     onConnected({
       ...form,
+      claudeMode,
       elementorPro: !!(result && result.elementorPro),
       allowPro,
       unsplashKey,
@@ -122,20 +125,48 @@ export default function ConnectScreen({ onConnected }) {
       </div>
       <p className="hint">WordPress Admin → Users → Profile → Application Passwords → add new.</p>
 
-      <label className="label">Claude API key</label>
-      <div className="input-row">
-        <input
-          className="input"
-          type={show.key ? 'text' : 'password'}
-          placeholder="sk-ant-..."
-          value={form.claudeKey}
-          onChange={set('claudeKey')}
-        />
-        <button type="button" className="ghost" onClick={() => setShow((s) => ({ ...s, key: !s.key }))}>
-          {show.key ? 'Hide' : 'Show'}
+      <label className="label">Claude access</label>
+      <div className="seg">
+        <button
+          type="button"
+          className={claudeMode === 'api' ? 'seg-btn active' : 'seg-btn'}
+          onClick={() => setClaudeMode('api')}
+        >
+          API key
+        </button>
+        <button
+          type="button"
+          className={claudeMode === 'cli' ? 'seg-btn active' : 'seg-btn'}
+          onClick={() => setClaudeMode('cli')}
+        >
+          Local Claude CLI
         </button>
       </div>
-      <p className="hint">Get one at console.anthropic.com. Used only server-side.</p>
+
+      {claudeMode === 'api' ? (
+        <>
+          <label className="label">Claude API key</label>
+          <div className="input-row">
+            <input
+              className="input"
+              type={show.key ? 'text' : 'password'}
+              placeholder="sk-ant-..."
+              value={form.claudeKey}
+              onChange={set('claudeKey')}
+            />
+            <button type="button" className="ghost" onClick={() => setShow((s) => ({ ...s, key: !s.key }))}>
+              {show.key ? 'Hide' : 'Show'}
+            </button>
+          </div>
+          <p className="hint">Get one at console.anthropic.com. Used only server-side.</p>
+        </>
+      ) : (
+        <p className="hint">
+          Uses the Claude Code CLI installed on THIS machine and its own login — no API key
+          needed. Install once with <code>npm install -g @anthropic-ai/claude-code</code>, then
+          run <code>claude</code> in a terminal and sign in. The connection test checks it works.
+        </p>
+      )}
 
       {/* Model is fixed internally to Claude Opus 4.8 — the strongest design
           model. No user-facing selector (per product decision). */}
@@ -162,6 +193,18 @@ export default function ConnectScreen({ onConnected }) {
               </div>
             );
           })}
+          {claudeMode === 'cli' && 'claudeCli' in result && (
+            <div className={`check ${result.claudeCli ? 'ok' : 'bad'}`}>
+              <span className="dot">{result.claudeCli ? '✓' : '✕'}</span>
+              <span className="check-label">Claude CLI ready</span>
+              {result.claudeCli && result.claudeCliVersion && (
+                <span className="ver">{result.claudeCliVersion}</span>
+              )}
+              {!result.claudeCli && (
+                <span className="fix">{(result.messages && result.messages.claudeCli) || 'Install Claude Code and sign in, then re-test.'}</span>
+              )}
+            </div>
+          )}
         </div>
       )}
 

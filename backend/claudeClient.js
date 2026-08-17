@@ -173,8 +173,11 @@ function pageGenSystem(allowPro) {
  * Factory — bind an API key + model to a set of callable methods.
  * `createClaudeClient` keeps the key in closure scope, never on the object.
  */
-function createClaudeClient(apiKey, model = MODEL_DEFAULT) {
-  if (!apiKey) throw new Error('Missing Claude API key.');
+function createClaudeClient(apiKey, model = MODEL_DEFAULT, opts = {}) {
+  // Transport: 'api' (default — HTTP with the key) or 'cli' (the locally
+  // installed Claude Code binary and its own login; no API key involved).
+  const useCli = !!(opts && opts.useCli);
+  if (!apiKey && !useCli) throw new Error('Missing Claude API key.');
 
   // One streamed request. Returns { text, stopReason }. Streaming avoids the
   // ~5-minute undici headers timeout (headers arrive immediately, tokens flow).
@@ -232,6 +235,14 @@ function createClaudeClient(apiKey, model = MODEL_DEFAULT) {
    * window comes back as ONE complete string (no mid-JSON truncation).
    */
   async function rawMessage({ system, messages, onDelta }) {
+    // CLI transport: one full-response call through the local Claude Code
+    // binary (it manages its own output internally — no continuation windows).
+    // The same concurrency gate applies so parallel passes don't spawn a
+    // process storm.
+    if (useCli) {
+      const cli = require('./claudeCliClient');
+      return withConcurrencyGate(() => cli.runMessage({ system, messages, model, onDelta }));
+    }
     let full = '';
     for (let seg = 0; seg < MAX_OUTPUT_SEGMENTS; seg++) {
       // Continue a truncated segment with a real assistant turn FOLLOWED BY a

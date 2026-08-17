@@ -73,20 +73,35 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 /** ---------- Connect: store creds + run the full test ---------- */
 app.post('/api/connect/test', async (req, res) => {
   const {
-    wpUrl, wpUser, wpAppPassword, claudeKey, claudeModel,
+    wpUrl, wpUser, wpAppPassword, claudeKey, claudeModel, claudeMode,
     allowPro, unsplashKey, geminiKey, brandContext,
   } = req.body || {};
-  if (!wpUrl || !wpUser || !wpAppPassword || !claudeKey) {
+  // Claude access: 'api' (key required) or 'cli' (local Claude Code login —
+  // no key). CLI availability is probed and reported in the checklist.
+  const mode = claudeMode === 'cli' ? 'cli' : 'api';
+  if (!wpUrl || !wpUser || !wpAppPassword || (mode === 'api' && !claudeKey)) {
     return res.status(400).json({ error: { code: 'missing_fields', message: 'All credential fields are required.' } });
   }
 
   const creds = { wpUrl, wpUser, wpAppPassword };
   try {
     const result = await wpClient.connectionTest(creds);
+    if (mode === 'cli') {
+      const cli = await require('./claudeCliClient').isAvailable();
+      result.claudeCli = cli.ok;
+      result.claudeCliVersion = cli.version || '';
+      result.messages = result.messages || {};
+      if (!cli.ok) {
+        result.messages.claudeCli =
+          `Claude CLI not found or not working (${cli.error}). Install Claude Code ` +
+          '(npm install -g @anthropic-ai/claude-code) and sign in by running `claude` once.';
+      }
+    }
     // Persist only if the site is reachable and auth is valid.
     if (result.wpReachable && result.authValid) {
       req.session.creds = creds;
-      req.session.claudeKey = claudeKey;
+      req.session.claudeMode = mode;
+      req.session.claudeKey = mode === 'cli' ? '' : claudeKey;
       req.session.claudeModel = claudeModel || undefined;
       req.session.connected = result.pluginInstalled && result.elementorActive;
       // v2 advanced options — default allowPro to whether Pro is active.
@@ -371,7 +386,8 @@ app.post('/api/components/suggest', async (req, res) => {
   try {
     const creds = getCreds(req);
     const claudeKey = req.session.claudeKey;
-    if (!claudeKey) return res.status(401).json({ error: { code: 'not_connected', message: 'Missing Claude API key.' } });
+    const useCli = req.session.claudeMode === 'cli';
+    if (!claudeKey && !useCli) return res.status(401).json({ error: { code: 'not_connected', message: 'Missing Claude API key.' } });
     const prompt = (req.body && req.body.prompt) || '';
     if (!String(prompt).trim()) {
       return res.status(400).json({ error: { code: 'bad_request', message: 'prompt is required.' } });
@@ -380,7 +396,7 @@ app.post('/api/components/suggest', async (req, res) => {
     if (!components.length) return res.json({ picks: [] });
 
     const { createClaudeClient } = require('./claudeClient');
-    const claude = createClaudeClient(claudeKey, req.session.claudeModel);
+    const claude = createClaudeClient(claudeKey, req.session.claudeModel, { useCli });
     const raw = await claude.suggestComponents({ prompt: String(prompt).slice(0, 4000), components });
     let picks = [];
     try {
@@ -501,13 +517,14 @@ app.post('/api/suggest', async (req, res) => {
   try {
     getCreds(req);
     const claudeKey = req.session.claudeKey;
-    if (!claudeKey) return res.status(401).json({ error: { code: 'not_connected', message: 'Missing Claude API key.' } });
+    const useCli = req.session.claudeMode === 'cli';
+    if (!claudeKey && !useCli) return res.status(401).json({ error: { code: 'not_connected', message: 'Missing Claude API key.' } });
     const { pageJson, prompt } = req.body || {};
     if (!pageJson || typeof pageJson !== 'object') {
       return res.status(400).json({ error: { code: 'bad_request', message: 'pageJson is required.' } });
     }
     const { createClaudeClient } = require('./claudeClient');
-    const claude = createClaudeClient(claudeKey, req.session.claudeModel);
+    const claude = createClaudeClient(claudeKey, req.session.claudeModel, { useCli });
     const raw = await claude.suggestImprovements({ pageJson, prompt: prompt || '' });
     let out = { suggestions: [] };
     try {
@@ -569,12 +586,13 @@ app.post('/api/refine', async (req, res) => {
 });
 
 async function handleGenerate(req, res, isRefine) {
-  let creds, claudeKey, claudeModel;
+  let creds, claudeKey, claudeModel, claudeUseCli;
   try {
     creds = getCreds(req);
     claudeKey = req.session.claudeKey;
     claudeModel = req.session.claudeModel;
-    if (!claudeKey) throw Object.assign(new Error('Missing Claude API key.'), { status: 401 });
+    claudeUseCli = req.session.claudeMode === 'cli';
+    if (!claudeKey && !claudeUseCli) throw Object.assign(new Error('Missing Claude API key.'), { status: 401 });
   } catch (err) {
     return res.status(err.status || 401).json({ error: { code: 'not_connected', message: err.message } });
   }
@@ -713,6 +731,7 @@ async function handleGenerate(req, res, isRefine) {
       creds,
       claudeKey,
       claudeModel,
+      claudeUseCli,
       mode: isRefine ? 'edit' : mode,
       pageId: isRefine ? (pageId || (previousJson && previousJson.pageId)) : pageId,
       prompt: effectivePrompt,
