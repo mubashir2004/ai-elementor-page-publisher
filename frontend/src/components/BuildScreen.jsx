@@ -229,7 +229,15 @@ export default function BuildScreen({
 
   // Multi-page site + design variations (mutually exclusive).
   const [multiPage, setMultiPage] = useState(false);
-  const [pageNames, setPageNames] = useState('');
+  // Each page of a multi-page site carries its OWN references (uploads and/or
+  // a scanned URL); a page without any falls back to the shared references.
+  const newSitePage = (name = '') => ({
+    id: Math.random().toString(36).slice(2, 9), name, images: [], scanUrl: '', scanBusy: false, scanError: '',
+  });
+  const [sitePages, setSitePages] = useState(() => [newSitePage('Home'), newSitePage('')]);
+  const patchSitePage = (id, patch) => setSitePages((cur) => cur.map((pg) => (
+    pg.id === id ? { ...pg, ...(typeof patch === 'function' ? patch(pg) : patch) } : pg
+  )));
   const [variations, setVariations] = useState(1); // 1 | 2 | 3
 
   // Header handling: most WP themes already provide one, so default 'none'.
@@ -436,16 +444,19 @@ export default function BuildScreen({
     (Object.values(brand).join(' ').trim().length || 0) / 4,
   );
 
-  async function addFiles(fileList) {
+  /** Convert a FileList into reference image objects (PNG/JPG/PDF pages) within
+   *  the MAX_IMAGES limit. Shared by the main references and per-page references
+   *  in multi-page mode. Returns [] when nothing fits. */
+  async function filesToImages(fileList, currentCount) {
     const files = Array.from(fileList);
-    const room = MAX_IMAGES - images.length;
+    const room = MAX_IMAGES - currentCount;
     if (room <= 0) {
       setError({ message: `Limit is ${MAX_IMAGES} references — remove one first.` });
-      return;
+      return [];
     }
     // Tiered per-image budgets so even a 30-reference batch stays under the
     // Claude request ceiling: >3 refs = smaller, >10 refs = smallest.
-    const total = images.length + files.length;
+    const total = currentCount + files.length;
     const budget = total > LOTS_IMAGES_THRESHOLD
       ? [TINY_TARGET_BYTES, TINY_MAX_EDGE]
       : (total > MANY_IMAGES_THRESHOLD ? [SMALL_TARGET_BYTES, SMALL_MAX_EDGE] : null);
@@ -485,14 +496,32 @@ export default function BuildScreen({
         setError({ message: `${f.name}: ${(e && e.message) || 'could not be read.'}` });
       }
     }
-    setImages((cur) => [...cur, ...next].slice(0, MAX_IMAGES));
+    return next;
+  }
+
+
+  async function addFiles(fileList) {
+    const next = await filesToImages(fileList, images.length);
+    if (next.length) setImages((cur) => [...cur, ...next].slice(0, MAX_IMAGES));
+  }
+
+  /** Multi-page: add references to ONE page only. */
+  async function addPageFiles(pageId, fileList) {
+    const pg = sitePages.find((x) => x.id === pageId);
+    const next = await filesToImages(fileList, pg ? pg.images.length : 0);
+    if (next.length) patchSitePage(pageId, (x) => ({ images: [...x.images, ...next].slice(0, MAX_IMAGES) }));
+  }
+
+  function removePageImage(pageId, i) {
+    patchSitePage(pageId, (x) => ({ images: x.images.filter((_, idx) => idx !== i) }));
   }
 
   function removeImage(i) {
     setImages((cur) => cur.filter((_, idx) => idx !== i));
   }
 
-  const parsedPageNames = pageNames.split(',').map((s) => s.trim()).filter(Boolean);
+  const namedSitePages = sitePages.filter((pg) => pg.name.trim());
+  const parsedPageNames = namedSitePages.map((pg) => pg.name.trim());
   const multiActive = mode === 'new' && multiPage;
   const variationsActive = mode === 'new' && !multiPage && variations > 1;
   const useGlobalsActive = colorSource === 'globals' && !!globals;
@@ -710,7 +739,6 @@ export default function BuildScreen({
             refinePrompt: prompt,
             imageMode,
             geminiKey,
-      geminiKey,
             includeHeader,
             brandId: myBrandId || undefined,
           },
@@ -719,11 +747,22 @@ export default function BuildScreen({
       return;
     }
 
-    if (multiActive && parsedPageNames.length > 0) {
-      await runBatch('multi', parsedPageNames.map((name) => ({
-        name,
-        body: { ...baseGenerateBody(), title: name, prompt: multiPagePrompt(prompt, name) },
-      })));
+    if (multiActive && namedSitePages.length > 0) {
+      // Each page uses its OWN references when it has any; otherwise the
+      // shared references (so the brand still carries across the site).
+      await runBatch('multi', namedSitePages.map((pg) => {
+        const name = pg.name.trim();
+        const refs = pg.images.length ? pg.images : images;
+        return {
+          name,
+          body: {
+            ...baseGenerateBody(),
+            title: name,
+            prompt: multiPagePrompt(prompt, name),
+            images: refs.map(({ base64, mediaType, name: n }) => ({ base64, mediaType, name: n })),
+          },
+        };
+      }));
       return;
     }
 
@@ -1112,46 +1151,69 @@ export default function BuildScreen({
 
   /* ---- Scan a website for references ---- */
 
+  /** Scan a URL into reference images (+ optional design-hint text). Shared by
+   *  the main scan box and per-page scans in multi-page mode. */
+  async function scanToImages(url, currentCount) {
+    const data = await scanWebsite(url);
+    const scanned = Array.isArray(data && data.images)
+      ? data.images.filter((im) => im && im.base64)
+      : [];
+    const room = MAX_IMAGES - currentCount;
+    if (scanned.length > 0 && room <= 0) {
+      throw new Error(`Limit is ${MAX_IMAGES} references — remove one first.`);
+    }
+    const next = scanned.slice(0, Math.max(0, room)).map((im) => {
+      const mediaType = im.mediaType || 'image/png';
+      return {
+        base64: im.base64,
+        mediaType,
+        name: im.name || url,
+        preview: `data:${mediaType};base64,${im.base64}`,
+      };
+    });
+    const hints = (data && data.hints) || {};
+    const fonts = Array.isArray(hints.fonts) ? hints.fonts.filter(Boolean) : [];
+    const colors = Array.isArray(hints.colors) ? hints.colors.filter(Boolean) : [];
+    let hintText = '';
+    if (fonts.length > 0 || colors.length > 0) {
+      const parts = [];
+      if (fonts.length > 0) parts.push(`fonts ${fonts.join(', ')}`);
+      if (colors.length > 0) parts.push(`colors ${colors.join(', ')}`);
+      hintText = `Design hints from scan: ${parts.join(', ')}`;
+    }
+    return { next, hintText };
+  }
+
   async function handleScan() {
     const url = scanUrl.trim();
     if (!url) return;
     setScanBusy(true);
     setScanError(null);
     try {
-      const data = await scanWebsite(url);
-      const scanned = Array.isArray(data && data.images)
-        ? data.images.filter((im) => im && im.base64)
-        : [];
-      const room = MAX_IMAGES - images.length;
-      if (scanned.length > 0 && room <= 0) {
-        throw new Error(`Limit is ${MAX_IMAGES} references — remove one first.`);
-      }
-      if (scanned.length > 0) {
-        const next = scanned.slice(0, room).map((im) => {
-          const mediaType = im.mediaType || 'image/png';
-          return {
-            base64: im.base64,
-            mediaType,
-            name: im.name || url,
-            preview: `data:${mediaType};base64,${im.base64}`,
-          };
-        });
-        setImages((cur) => [...cur, ...next].slice(0, MAX_IMAGES));
-      }
-      const hints = (data && data.hints) || {};
-      const fonts = Array.isArray(hints.fonts) ? hints.fonts.filter(Boolean) : [];
-      const colors = Array.isArray(hints.colors) ? hints.colors.filter(Boolean) : [];
-      if (fonts.length > 0 || colors.length > 0) {
-        const parts = [];
-        if (fonts.length > 0) parts.push(`fonts ${fonts.join(', ')}`);
-        if (colors.length > 0) parts.push(`colors ${colors.join(', ')}`);
-        setPrompt((p) => `${p}\nDesign hints from scan: ${parts.join(', ')}`);
-      }
+      const { next, hintText } = await scanToImages(url, images.length);
+      if (next.length) setImages((cur) => [...cur, ...next].slice(0, MAX_IMAGES));
+      if (hintText) setPrompt((p) => `${p}\n${hintText}`);
       setScanUrl('');
     } catch (e) {
       setScanError(e.message);
     } finally {
       setScanBusy(false);
+    }
+  }
+
+  /** Multi-page: scan a URL into ONE page's references. */
+  async function handlePageScan(pageId) {
+    const pg = sitePages.find((x) => x.id === pageId);
+    const url = pg ? pg.scanUrl.trim() : '';
+    if (!url) return;
+    patchSitePage(pageId, { scanBusy: true, scanError: '' });
+    try {
+      const { next } = await scanToImages(url, pg.images.length);
+      patchSitePage(pageId, (x) => ({
+        images: [...x.images, ...next].slice(0, MAX_IMAGES), scanUrl: '', scanBusy: false,
+      }));
+    } catch (e) {
+      patchSitePage(pageId, { scanBusy: false, scanError: e.message });
     }
   }
 
@@ -2213,16 +2275,88 @@ export default function BuildScreen({
           )}
           {multiPage && (
             <>
-              <label className="label">Pages to build (comma-separated)</label>
-              <input
-                className="input"
-                placeholder="Home, About, Services, Contact"
-                value={pageNames}
-                onChange={(e) => setPageNames(e.target.value)}
-              />
+              <p className="hint">
+                Each page gets its <b>own</b> references — upload images or scan the matching page of a site.
+                A page with no references of its own uses the shared references above.
+              </p>
+              {sitePages.map((pg, i) => (
+                <div className="site-page" key={pg.id}>
+                  <div className="site-page-head">
+                    <span className="site-page-num">{i + 1}</span>
+                    <input
+                      className="input"
+                      placeholder={i === 0 ? 'Page name, e.g. Home' : 'Page name, e.g. About, Services, Contact'}
+                      value={pg.name}
+                      onChange={(e) => patchSitePage(pg.id, { name: e.target.value })}
+                    />
+                    {sitePages.length > 1 && (
+                      <button
+                        type="button"
+                        className="ghost"
+                        title="Remove this page"
+                        onClick={() => setSitePages((cur) => cur.filter((x) => x.id !== pg.id))}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                  <div className="site-page-refs">
+                    <label className="mini-drop">
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,application/pdf"
+                        multiple
+                        hidden
+                        onChange={(e) => { addPageFiles(pg.id, e.target.files); e.target.value = ''; }}
+                      />
+                      + Upload references for this page
+                    </label>
+                    <div className="input-row">
+                      <input
+                        className="input"
+                        placeholder="or scan this page's URL, e.g. https://example.com/about"
+                        value={pg.scanUrl}
+                        onChange={(e) => patchSitePage(pg.id, { scanUrl: e.target.value })}
+                        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handlePageScan(pg.id); } }}
+                      />
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => handlePageScan(pg.id)}
+                        disabled={pg.scanBusy || !pg.scanUrl.trim()}
+                      >
+                        {pg.scanBusy ? 'Scanning…' : 'Scan'}
+                      </button>
+                    </div>
+                    {pg.scanError && <div className="alert-error">{pg.scanError}</div>}
+                    {pg.images.length > 0 ? (
+                      <div className="thumbs small">
+                        {pg.images.map((img, k) => (
+                          <div className="thumb" key={k}>
+                            <img src={img.preview} alt={img.name} />
+                            <button className="thumb-x" onClick={() => removePageImage(pg.id, k)}>✕</button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="hint">
+                        No page-specific references yet — this page will use the shared references
+                        {images.length > 0 ? ` (${images.length} attached)` : ' (none attached yet)'}.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="secondary add-page-btn"
+                onClick={() => setSitePages((cur) => [...cur, newSitePage('')])}
+              >
+                + Add another page
+              </button>
               {parsedPageNames.length === 0
-                ? <p className="hint">Add at least one page name to generate.</p>
-                : <p className="hint">{parsedPageNames.length} page{parsedPageNames.length > 1 ? 's' : ''}, built one after another — palette, typography, header and footer stay identical across the site.</p>}
+                ? <p className="hint">Name at least one page to generate.</p>
+                : <p className="hint">{parsedPageNames.length} page{parsedPageNames.length > 1 ? 's' : ''} will be built in parallel — palette, typography, header and footer stay identical across the site.</p>}
             </>
           )}
         </div>
