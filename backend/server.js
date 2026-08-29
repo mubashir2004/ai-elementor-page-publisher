@@ -20,6 +20,7 @@
 const express = require('express');
 const session = require('express-session');
 const cors = require('cors');
+const path = require('path');
 
 const wpClient = require('./wpClient');
 const historyStore = require('./historyStore');
@@ -49,12 +50,38 @@ app.use(cors({
   ])],
   credentials: true,
 }));
+// Sessions are FILE-BACKED: the default in-memory store dies with the
+// process, so any backend restart or crash threw the user back to the
+// Connect screen mid-build. On disk they survive both.
+const FileStore = require('session-file-store')(session);
 app.use(session({
+  store: new FileStore({
+    path: path.join(__dirname, 'data', 'sessions'),
+    ttl: 7 * 24 * 60 * 60,        // a week — long builds must never expire
+    retries: 1,
+    reapInterval: 60 * 60,
+    logFn: () => {},              // its chatter would drown the build logs
+  }),
   secret: process.env.SESSION_SECRET || 'dev-secret-change-me',
   resave: false,
   saveUninitialized: false,
-  cookie: { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production' },
+  rolling: true,
+  cookie: {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  },
 }));
+
+// A single unhandled error must never take the server down mid-generation
+// (that is what silently killed a running build and forced a re-login).
+process.on('uncaughtException', (err) => {
+  console.error('[fatal-guard] uncaught exception:', (err && err.stack) || err);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('[fatal-guard] unhandled rejection:', (err && err.stack) || err);
+});
 
 /** Pull creds from session or throw a clean 401. */
 function getCreds(req) {
@@ -607,6 +634,17 @@ async function handleGenerate(req, res, isRefine) {
     res.write(`event: ${event}\n`);
     res.write(`data: ${JSON.stringify(data || {})}\n\n`);
   };
+  // Heartbeat: a long model call can run for minutes with nothing to report,
+  // and a silent socket gets dropped by proxies/AV layers — which the browser
+  // sees as a stream that simply ends, leaving the UI "generating" forever.
+  // A comment frame every 15s keeps it alive and lets the client tell the
+  // difference between "still working" and "the backend died".
+  const heartbeat = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch (_) { /* socket already gone */ }
+  }, 15000);
+  const stopHeartbeat = () => clearInterval(heartbeat);
+  res.on('close', stopHeartbeat);
+  res.on('finish', stopHeartbeat);
 
   const body = req.body || {};
   const {

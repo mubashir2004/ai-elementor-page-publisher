@@ -2302,20 +2302,26 @@ async function resolveGeminiImages(content, geminiKey, creds, wp, promptKeywords
 
   // Concurrency pool of 3: image generation dominates build time when run
   // strictly sequentially; three in flight cuts that to a third.
-  const CONCURRENCY = 3;
-  const ATTEMPTS = 4; // per slot — transient API errors/quota blips get retried
+  const CONCURRENCY = 6;   // image calls are independent — more in flight
+  const ATTEMPTS = 2;      // one retry for a transient blip, not four
+  // Hard wall-clock budget for the whole image stage. Without it a page with
+  // many slots x retries x 45s timeouts could run for 40+ minutes on its own.
+  const BUDGET_MS = 8 * 60 * 1000;
+  const deadline = Date.now() + BUDGET_MS;
   let generated = 0;
   let i = 0;
   async function worker() {
     while (i < need.length) {
       const sl = need[i++];
       const query = (sl.query && String(sl.query).trim()) || fallback || 'a professional marketing scene';
+      if (Date.now() > deadline) break; // budget spent — stop starting new work
       for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
         try {
           const img = await geminiImageClient.generateImage(query, geminiKey);
           if (!img) {
+            if (Date.now() > deadline) break;
             // brief pause before retrying — quota blips clear in seconds
-            await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+            await new Promise((r) => setTimeout(r, 800));
             continue;
           }
           // Resize/compress for the web before it lands in the media library

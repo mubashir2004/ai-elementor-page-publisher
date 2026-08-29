@@ -213,21 +213,60 @@ export async function streamRun(path, body, handlers) {
   const decoder = new TextDecoder();
   let buffer = '';
 
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+  // A run MUST end in exactly one terminal event. Previously, if the backend
+  // died or the socket dropped mid-build, the loop just ended silently and the
+  // UI sat on "generating…" forever. Track it and always report an outcome.
+  let settled = false;
+  const wrapped = {
+    ...handlers,
+    onDone: (r) => { settled = true; handlers.onDone && handlers.onDone(r); },
+    onError: (e) => { settled = true; handlers.onError && handlers.onError(e); },
+  };
 
-    // SSE frames are separated by a blank line.
-    let idx;
-    while ((idx = buffer.indexOf('\n\n')) !== -1) {
-      const frame = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
-      handleFrame(frame, handlers);
+  // Stall watchdog: the server sends a heartbeat every 15s, so a long silence
+  // means the connection is dead, not that the model is thinking.
+  const STALL_MS = 90 * 1000;
+  let lastByteAt = Date.now();
+  let stalled = false;
+  const stallTimer = setInterval(() => {
+    if (Date.now() - lastByteAt > STALL_MS && !settled) {
+      stalled = true;
+      try { reader.cancel(); } catch (_) { /* already closed */ }
     }
+  }, 5000);
+
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      lastByteAt = Date.now();
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE frames are separated by a blank line.
+      let idx;
+      while ((idx = buffer.indexOf('\n\n')) !== -1) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        handleFrame(frame, wrapped);
+      }
+    }
+    // flush any trailing frame
+    if (buffer.trim()) handleFrame(buffer, wrapped);
+  } catch (e) {
+    if (!settled) {
+      wrapped.onError({ message: `Connection to the backend was lost mid-build (${e.message}). The build did not finish — check that the backend is running, then try again.` });
+    }
+  } finally {
+    clearInterval(stallTimer);
   }
-  // flush any trailing frame
-  if (buffer.trim()) handleFrame(buffer, handlers);
+
+  if (!settled) {
+    wrapped.onError({
+      message: stalled
+        ? 'The backend stopped responding (no heartbeat for 90 seconds) — it likely crashed or was restarted. Nothing was published; start the build again.'
+        : 'The backend closed the connection before the build finished — it likely crashed or was restarted. Nothing was published; start the build again.',
+    });
+  }
 }
 
 function handleFrame(frame, handlers) {

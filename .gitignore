@@ -9,3 +9,6 @@ npm-debug.log*
 # Runtime data — page history, backups, usage stats from connected sites
 backend/data/
 backend/backups/
+
+# Backend runtime log
+backend/server.log
