@@ -234,7 +234,7 @@ export default function BuildScreen({
   const newSitePage = (name = '') => ({
     id: Math.random().toString(36).slice(2, 9), name, images: [], scanUrl: '', scanBusy: false, scanError: '',
   });
-  const [sitePages, setSitePages] = useState(() => [newSitePage('Home'), newSitePage('')]);
+  const [sitePages, setSitePages] = useState(() => [newSitePage(''), newSitePage('')]);
   const patchSitePage = (id, patch) => setSitePages((cur) => cur.map((pg) => (
     pg.id === id ? { ...pg, ...(typeof patch === 'function' ? patch(pg) : patch) } : pg
   )));
@@ -522,6 +522,10 @@ export default function BuildScreen({
 
   const namedSitePages = sitePages.filter((pg) => pg.name.trim());
   const parsedPageNames = namedSitePages.map((pg) => pg.name.trim());
+  const unnamedCount = sitePages.length - namedSitePages.length;
+  const duplicateNames = [...new Set(
+    parsedPageNames.filter((n, i) => parsedPageNames.findIndex((m) => m.toLowerCase() === n.toLowerCase()) !== i)
+  )];
   const multiActive = mode === 'new' && multiPage;
   const variationsActive = mode === 'new' && !multiPage && variations > 1;
   const useGlobalsActive = colorSource === 'globals' && !!globals;
@@ -2268,7 +2272,7 @@ export default function BuildScreen({
                 if (e.target.checked) setVariations(1); // mutually exclusive with variations
               }}
             />
-            <span>Multi-page site <span className="toggle-hint">build several pages that share one brand</span></span>
+            <span>Multi-page site <span className="toggle-hint">build several pages that share one brand — name every page below</span></span>
           </label>
           {images.length > 1 && !multiPage && (
             <p className="hint">You attached {images.length} references — enable this to build a whole site in one run.</p>
@@ -2354,9 +2358,23 @@ export default function BuildScreen({
               >
                 + Add another page
               </button>
+              {unnamedCount > 0 && (
+                <p className="hint warn">
+                  {unnamedCount} page block{unnamedCount > 1 ? 's have' : ' has'} no name and will be SKIPPED — type a name or remove the block.
+                </p>
+              )}
+              {duplicateNames.length > 0 && (
+                <p className="hint warn">
+                  Duplicate page name{duplicateNames.length > 1 ? 's' : ''}: {duplicateNames.join(', ')} — each page needs its own title or you get two pages with the same name in WordPress.
+                </p>
+              )}
               {parsedPageNames.length === 0
                 ? <p className="hint">Name at least one page to generate.</p>
-                : <p className="hint">{parsedPageNames.length} page{parsedPageNames.length > 1 ? 's' : ''} will be built in parallel — palette, typography, header and footer stay identical across the site.</p>}
+                : (
+                  <p className="hint build-summary">
+                    <b>{parsedPageNames.length} page{parsedPageNames.length > 1 ? 's' : ''} will be built:</b> {parsedPageNames.join(', ')} — in parallel, sharing one palette, typography, header and footer.
+                  </p>
+                )}
             </>
           )}
         </div>
@@ -2790,7 +2808,14 @@ export default function BuildScreen({
       {mode === 'new' && (
         <>
           <label className="label">Page title (optional)</label>
-          <input className="input" placeholder="Left blank = AI decides" value={title} onChange={(e) => setTitle(e.target.value)} />
+          {multiPage ? (
+            <p className="hint">
+              Multi-page mode is on — each page is titled by its own name in the
+              <b> Pages to build</b> list on the left. This field is not used.
+            </p>
+          ) : (
+            <input className="input" placeholder="Left blank = AI decides" value={title} onChange={(e) => setTitle(e.target.value)} />
+          )}
         </>
       )}
 

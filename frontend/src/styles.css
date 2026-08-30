@@ -764,3 +764,7 @@ body {
 .site-page-refs .input-row { margin-top: 8px; }
 .thumbs.small .thumb { width: 72px; height: 56px; }
 .add-page-btn { margin-top: 12px; }
+
+/* Multi-page warnings + build summary */
+.hint.warn { color: #f6b26b; }
+.hint.build-summary { color: var(--text); }

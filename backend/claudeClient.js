@@ -20,11 +20,15 @@ const path = require('path');
 
 const ANTHROPIC_URL = process.env.EAI_ANTHROPIC_URL || 'https://api.anthropic.com/v1/messages';
 const MODEL_DEFAULT = 'claude-opus-4-8';
-const MAX_TOKENS = 32000;
+// Opus 4.8 supports up to 128K output tokens when streaming (we always
+// stream). At 32K a full page needed 2-3 CONTINUATION round trips, and each
+// continuation re-sends everything written so far — the single biggest
+// avoidable cost in a build. 64K lets most pages finish in one pass.
+const MAX_TOKENS = 64000;
 // A full page can exceed one max_tokens window. If a segment stops on
 // `max_tokens` we continue it (assistant prefill) up to this many segments so
 // the JSON comes back COMPLETE instead of truncated (the old truncation was the
-// "Could not obtain valid JSON" cause). 3 × 32k = plenty for any page.
+// "Could not obtain valid JSON" cause). 3 x 64k = plenty for any page.
 const MAX_OUTPUT_SEGMENTS = 3;
 const TEMPERATURE = 0.2;
 
