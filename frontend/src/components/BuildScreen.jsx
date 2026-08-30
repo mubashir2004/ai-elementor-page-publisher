@@ -756,7 +756,8 @@ export default function BuildScreen({
       // shared references (so the brand still carries across the site).
       await runBatch('multi', namedSitePages.map((pg) => {
         const name = pg.name.trim();
-        const refs = pg.images.length ? pg.images : images;
+        const page1Refs = (sitePages[0] && sitePages[0].images) || [];
+        const refs = pg.images.length ? pg.images : (page1Refs.length ? page1Refs : images);
         return {
           name,
           body: {
@@ -2204,8 +2205,9 @@ export default function BuildScreen({
         </div>
       )}
 
-      {/* Image dropzone (Person 7) */}
-      {mode === 'new' && (
+      {/* Image dropzone (Person 7) — single-page mode only. In multi-page mode
+          every page carries its own references inside its own block. */}
+      {mode === 'new' && !multiPage && (
         <>
           <label className="label">Mockup references (optional, up to {MAX_IMAGES})</label>
           <div
@@ -2262,31 +2264,40 @@ export default function BuildScreen({
 
       {/* Multi-page site */}
       {mode === 'new' && (
-        <div className={(images.length > 1 || multiPage) ? 'multi-panel highlight' : 'multi-panel'}>
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={multiPage}
-              onChange={(e) => {
-                setMultiPage(e.target.checked);
-                if (e.target.checked) setVariations(1); // mutually exclusive with variations
-              }}
-            />
-            <span>Multi-page site <span className="toggle-hint">build several pages that share one brand — name every page below</span></span>
-          </label>
-          {images.length > 1 && !multiPage && (
-            <p className="hint">You attached {images.length} references — enable this to build a whole site in one run.</p>
+        <div className={multiPage ? 'multi-panel highlight' : 'multi-panel'}>
+          <label className="label">How many pages?</label>
+          <div className="seg">
+            <button
+              type="button"
+              className={multiPage ? 'seg-btn' : 'seg-btn active'}
+              onClick={() => setMultiPage(false)}
+            >
+              Single page
+            </button>
+            <button
+              type="button"
+              className={multiPage ? 'seg-btn active' : 'seg-btn'}
+              onClick={() => { setMultiPage(true); setVariations(1); }}
+            >
+              Multiple pages
+            </button>
+          </div>
+          {!multiPage && images.length > 1 && (
+            <p className="hint">You attached {images.length} references — switch to Multiple pages to build a whole site in one run.</p>
           )}
           {multiPage && (
             <>
               <p className="hint">
-                Each page gets its <b>own</b> references — upload images or scan the matching page of a site.
-                A page with no references of its own uses the shared references above.
+                Every page is defined here — name it, then give it its own references
+                (upload images or scan that page's URL). A page left without references
+                reuses <b>Page 1's</b> references, so one design can drive a whole site.
+                All other settings on the right (template, palette, widget mode, header,
+                images, auto-refine) apply to <b>every</b> page.
               </p>
               {sitePages.map((pg, i) => (
                 <div className="site-page" key={pg.id}>
                   <div className="site-page-head">
-                    <span className="site-page-num">{i + 1}</span>
+                    <span className="site-page-num" title={`Page ${i + 1}`}>{i + 1}</span>
                     <input
                       className="input"
                       placeholder={i === 0 ? 'Page name, e.g. Home' : 'Page name, e.g. About, Services, Contact'}
@@ -2344,8 +2355,13 @@ export default function BuildScreen({
                       </div>
                     ) : (
                       <p className="hint">
-                        No page-specific references yet — this page will use the shared references
-                        {images.length > 0 ? ` (${images.length} attached)` : ' (none attached yet)'}.
+                        {i === 0
+                          ? (images.length > 0
+                            ? `No references of its own — this page will use the ${images.length} reference${images.length > 1 ? 's' : ''} you attached before switching to multi-page. Add images here to override.`
+                            : 'No references yet — add images or scan a URL. Pages below with no references of their own will reuse these.')
+                          : (sitePages[0] && sitePages[0].images.length
+                            ? `No references of its own — this page will reuse Page 1's ${sitePages[0].images.length} reference${sitePages[0].images.length > 1 ? 's' : ''}.`
+                            : 'No references yet — add images or scan a URL, or give Page 1 references for this page to reuse.')}
                       </p>
                     )}
                   </div>

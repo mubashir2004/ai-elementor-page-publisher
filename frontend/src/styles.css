@@ -768,3 +768,5 @@ body {
 /* Multi-page warnings + build summary */
 .hint.warn { color: #f6b26b; }
 .hint.build-summary { color: var(--text); }
+
+.multi-panel .seg { margin-top: 8px; }
