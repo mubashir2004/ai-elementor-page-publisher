@@ -1,0 +1,24 @@
+# Render blueprint — deploys the same single container as Railway.
+# Render: New + -> Blueprint -> pick this repo.
+services:
+  - type: web
+    name: ai-elementor-page-publisher
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Chromium (website scanner) + image processing need real memory.
+    # The free tier has 512MB, no persistent disk, and sleeps when idle —
+    # it cannot run this app.
+    plan: standard
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: EAI_DATA_DIR
+        value: /data
+      - key: SESSION_SECRET
+        generateValue: true
+    disk:
+      # Page history, sessions, saved brands and components.
+      name: eai-data
+      mountPath: /data
+      sizeGB: 5

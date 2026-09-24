@@ -86,6 +86,17 @@ the UI, on a Playwright base image so the website scanner has a real Chromium.
 
 `PORT` is provided by the platform and read automatically — don't hardcode it.
 
+**Render**
+
+New + → **Blueprint** → pick this repo; `render.yaml` defines the service, the
+`/data` disk and the variables (it generates `SESSION_SECRET` for you). Or create
+a **Web Service** manually with runtime *Docker*, health check path `/health`, a
+disk mounted at `/data`, and the same variables as above.
+
+Render's **free tier cannot run this app** — 512 MB RAM (Chromium and image
+processing need more), no persistent disk, and it sleeps when idle. Use a paid
+instance with a disk attached.
+
 **Bring your own keys.** Every user enters their own Claude API key (and
 optionally a Gemini key) on the Connect screen, held in their own server-side
 session — the deployment owner's keys are never used or stored, so a public
