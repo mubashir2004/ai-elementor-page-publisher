@@ -770,3 +770,13 @@ body {
 .hint.build-summary { color: var(--text); }
 
 .multi-panel .seg { margin-top: 8px; }
+
+/* Connect: companion-plugin download step */
+.plugin-step { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; justify-content: space-between;
+  margin: 16px 0 4px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px;
+  background: rgba(98,114,255,.07); }
+.plugin-step-text { display: flex; flex-direction: column; gap: 4px; max-width: 460px; }
+.plugin-step-text b { font-size: 14px; }
+.plugin-step-text span { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+.plugin-dl { display: inline-flex; align-items: center; justify-content: center; text-decoration: none;
+  white-space: nowrap; padding: 10px 16px; width: auto; margin: 0; }

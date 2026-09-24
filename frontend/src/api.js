@@ -66,6 +66,18 @@ async function putJson(path, body) {
   return data;
 }
 
+/** Direct URL of the companion-plugin zip (used by a plain download link). */
+export function pluginDownloadUrl() {
+  return `${BASE}/api/plugin/download`;
+}
+
+/** Availability + version of the bundled companion plugin. */
+export async function getPluginInfo() {
+  const res = await fetch(`${BASE}/api/plugin/info`, { credentials: 'include' });
+  if (!res.ok) return { available: false, version: '' };
+  return res.json().catch(() => ({ available: false, version: '' }));
+}
+
 export async function testConnection(creds) {
   return postJson('/api/connect/test', creds);
 }

@@ -8,8 +8,8 @@
  * ============================================================
  */
 
-import { useState } from 'react';
-import { testConnection, testGeminiKey } from '../api';
+import { useEffect, useState } from 'react';
+import { testConnection, testGeminiKey, getPluginInfo, pluginDownloadUrl } from '../api';
 
 const MODELS = ['claude-opus-4-8']; // fixed internally — Opus 4.8 is the design model
 
@@ -23,7 +23,7 @@ const CHECKS = [
 const FIXES = {
   wpReachable: 'Check the URL. It must be a live WordPress site over https://',
   authValid: 'Username or Application Password rejected — regenerate it under Users → Profile.',
-  pluginInstalled: 'Install & activate eai-connector.php on the site.',
+  pluginInstalled: 'Download the plugin above, then upload & activate it in WordPress (Plugins → Add New → Upload Plugin).',
   elementorActive: 'Activate the Elementor plugin on the site.',
 };
 
@@ -32,6 +32,16 @@ export default function ConnectScreen({ onConnected }) {
     wpUrl: '', wpUser: '', wpAppPassword: '', claudeKey: '', claudeModel: MODELS[0],
   });
   const [show, setShow] = useState({ pw: false, key: false });
+  // The connector plugin must be installed on the WP site before connecting,
+  // so the zip is offered right here (step 1) instead of being hunted down.
+  const [plugin, setPlugin] = useState({ available: false, version: '' });
+  useEffect(() => {
+    let alive = true;
+    getPluginInfo()
+      .then((info) => { if (alive) setPlugin(info || { available: false, version: '' }); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
   const [claudeMode, setClaudeMode] = useState('api'); // 'api' | 'cli'
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -102,6 +112,24 @@ export default function ConnectScreen({ onConnected }) {
     <div className="card">
       <h1 className="title">Connect your site</h1>
       <p className="subtitle">Credentials are held only in your server session. Nothing is stored to disk.</p>
+
+      {/* Step 1: install the companion plugin on the WordPress site. */}
+      <div className="plugin-step">
+        <div className="plugin-step-text">
+          <b>First, install the connector plugin</b>
+          <span>
+            Download the zip, then in WordPress go to <b>Plugins → Add New → Upload Plugin</b>,
+            choose it and activate. Without it this app cannot create Elementor pages on your site.
+          </span>
+        </div>
+        {plugin.available ? (
+          <a className="primary plugin-dl" href={pluginDownloadUrl()} download>
+            Download plugin{plugin.version ? ` v${plugin.version}` : ''} (.zip)
+          </a>
+        ) : (
+          <span className="hint">Plugin zip unavailable on this server.</span>
+        )}
+      </div>
 
       <label className="label">WordPress site URL</label>
       <input className="input" placeholder="https://yoursite.com" value={form.wpUrl} onChange={set('wpUrl')} />

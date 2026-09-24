@@ -21,6 +21,7 @@ const express = require('express');
 const session = require('express-session');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 
 const wpClient = require('./wpClient');
 const historyStore = require('./historyStore');
@@ -146,6 +147,46 @@ app.post('/api/connect/test', async (req, res) => {
 /** ---------- Disconnect ---------- */
 app.post('/api/disconnect', (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
+});
+
+/** ---------- Companion plugin download (no creds needed) ----------
+ * Users must install the connector plugin on their WordPress site BEFORE
+ * they can connect, so the zip is served straight from the app — no GitHub
+ * trip, no hunting for a file.
+ */
+const PLUGIN_ZIP = path.join(__dirname, '..', 'plugin', 'eai-connector.zip');
+const PLUGIN_PHP = path.join(__dirname, '..', 'plugin', 'eai-connector.php');
+
+function readPluginVersion() {
+  try {
+    const head = fs.readFileSync(PLUGIN_PHP, 'utf8').slice(0, 2000);
+    const m = head.match(/Version:\s*([0-9][0-9.]*)/i);
+    return m ? m[1] : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+app.get('/api/plugin/info', (_req, res) => {
+  const available = fs.existsSync(PLUGIN_ZIP);
+  res.json({
+    available,
+    version: available ? readPluginVersion() : '',
+    filename: 'eai-connector.zip',
+  });
+});
+
+app.get('/api/plugin/download', (_req, res) => {
+  if (!fs.existsSync(PLUGIN_ZIP)) {
+    return res.status(404).json({
+      error: { code: 'plugin_missing', message: 'The plugin zip is not bundled with this deployment.' },
+    });
+  }
+  res.download(PLUGIN_ZIP, 'eai-connector.zip', (err) => {
+    if (err && !res.headersSent) {
+      res.status(500).json({ error: { code: 'download_failed', message: err.message } });
+    }
+  });
 });
 
 /** ---------- Brand kits (no creds needed) ---------- */
