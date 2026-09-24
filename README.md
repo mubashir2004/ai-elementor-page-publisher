@@ -1,6 +1,6 @@
 # AI → Elementor Page Publisher
 
-Turn a prompt, mockup images, or a scanned website into a fully-styled, professional Elementor page — published straight to a WordPress site. Bring-your-own-key: the user supplies their own Claude API key and a WordPress Application Password. **Everything runs locally — no cloud middleman.**
+Turn a prompt, mockup images, or a scanned website into a fully-styled, professional Elementor page — published straight to a WordPress site. Bring-your-own-key: the user supplies their own Claude API key and a WordPress Application Password. **Runs entirely on your own machine or your own server — no cloud middleman.**
 
 ---
 
@@ -58,6 +58,51 @@ npm run dev               # http://localhost:5173
 #    Open http://localhost:5173 — enter the site URL, a WordPress Application
 #    Password (Users → Profile → Application Passwords), and your Claude API key.
 #    Optionally add a Gemini key for AI-generated images (use the Test button).
+```
+
+## Deploying (Railway, Render, Fly.io, any Docker host)
+
+The bundled `Dockerfile` builds **one** container that serves both the API and
+the UI, on a Playwright base image so the website scanner has a real Chromium.
+
+**Railway**
+
+1. New Project → Deploy from GitHub → pick this repo. `railway.json` selects the
+   Dockerfile and points health checks at `/health`.
+2. Add a **Volume** mounted at `/data`. Page history, sessions, saved brands and
+   components live there; without it every redeploy wipes them.
+3. Set variables:
+
+   | Variable | Value |
+   |---|---|
+   | `SESSION_SECRET` | any long random string (required — the default is a dev placeholder) |
+   | `NODE_ENV` | `production` (enables secure cookies and proxy trust) |
+   | `EAI_DATA_DIR` | `/data` (already the image default; set it if your mount path differs) |
+   | `FRONTEND_ORIGIN` | only for a split deploy — the URL of a separately hosted UI |
+   | `COOKIE_SAMESITE` | only for a split deploy — `none` (needs HTTPS) |
+
+4. Deploy, open the URL, download the connector plugin from the Connect screen,
+   install it on the WordPress site, and connect.
+
+`PORT` is provided by the platform and read automatically — don't hardcode it.
+
+**Bring your own keys.** Every user enters their own Claude API key (and
+optionally a Gemini key) on the Connect screen, held in their own server-side
+session — the deployment owner's keys are never used or stored, so a public
+instance costs you nothing in model spend.
+
+**Not Vercel/Netlify.** A page build runs 10–25 minutes on a live SSE stream;
+serverless functions cap out long before that, have no persistent disk for
+sessions and history, and can't run Chromium. Use a platform that runs a
+long-lived container.
+
+**Run the image locally**
+
+```bash
+docker build -t eai-publisher .
+docker run -p 8787:8787 -v eai-data:/data \
+  -e SESSION_SECRET=change-me eai-publisher
+# open http://localhost:8787
 ```
 
 ## Tests

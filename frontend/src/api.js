@@ -21,7 +21,12 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url,
 ).toString();
 
-const BASE = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8787';
+// Production builds talk to the SAME origin that served them (the backend
+// hosts the UI), so no backend URL needs baking in. The Vite dev server runs
+// on :5173 while the API is on :8787, hence the dev-only default. A split
+// deploy can still point the UI elsewhere with VITE_BACKEND_URL.
+const BASE = import.meta.env.VITE_BACKEND_URL
+  || (import.meta.env.DEV ? 'http://localhost:8787' : '');
 
 async function postJson(path, body) {
   const res = await fetch(`${BASE}${path}`, {

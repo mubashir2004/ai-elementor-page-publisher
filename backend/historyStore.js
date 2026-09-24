@@ -28,7 +28,10 @@ const MAX_VERSIONS = 20;
 
 /** Root dir for all history files (env override for tests). */
 function historyRoot() {
-  return process.env.EAI_HISTORY_DIR || path.join(__dirname, 'data', 'history');
+  if (process.env.EAI_HISTORY_DIR) return process.env.EAI_HISTORY_DIR;
+  // Follow the shared data root so a mounted volume keeps page history too.
+  const root = process.env.EAI_DATA_DIR || path.join(__dirname, 'data');
+  return path.join(root, 'history');
 }
 
 /** Derive a filesystem-safe site key from creds.wpUrl ([a-z0-9.-] only). */

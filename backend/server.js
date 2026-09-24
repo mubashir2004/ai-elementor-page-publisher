@@ -39,6 +39,15 @@ const geminiImageClient = require('./geminiImageClient');
 const app = express();
 const PORT = process.env.PORT || 8787;
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
+const IS_PROD = process.env.NODE_ENV === 'production';
+// Everything stateful lives under one root so a hosting volume can be mounted
+// at a single path (Railway: set EAI_DATA_DIR to the mount, e.g. /data).
+const DATA_DIR = process.env.EAI_DATA_DIR || path.join(__dirname, 'data');
+
+// Behind Railway/Render/Fly the app sits behind a TLS proxy. Without this,
+// Express thinks the connection is plain HTTP and refuses to set secure
+// cookies — users could never stay logged in.
+if (IS_PROD) app.set('trust proxy', 1);
 
 app.use(express.json({ limit: '500mb' })); // effectively unlimited — images are client-optimized before upload
 // Accept the configured origin plus its localhost/127.0.0.1 twin — some
@@ -57,7 +66,7 @@ app.use(cors({
 const FileStore = require('session-file-store')(session);
 app.use(session({
   store: new FileStore({
-    path: path.join(__dirname, 'data', 'sessions'),
+    path: path.join(DATA_DIR, 'sessions'),
     ttl: 7 * 24 * 60 * 60,        // a week — long builds must never expire
     retries: 1,
     reapInterval: 60 * 60,
@@ -69,8 +78,11 @@ app.use(session({
   rolling: true,
   cookie: {
     httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
+    // Same-origin deploys (UI served by this server) work with 'lax'. A split
+    // deploy — UI on another domain — needs COOKIE_SAMESITE=none, which the
+    // browser only honors together with secure:true (HTTPS).
+    sameSite: process.env.COOKIE_SAMESITE || 'lax',
+    secure: IS_PROD,
     maxAge: 7 * 24 * 60 * 60 * 1000,
   },
 }));
@@ -925,6 +937,20 @@ function buildGlobalKit(globals) {
 app.use((err, _req, res, _next) => {
   res.status(err.status || 500).json({ error: { code: err.code || 'server_error', message: err.message } });
 });
+
+// ---------- Serve the built frontend (single-service deploy) ----------
+// When frontend/dist exists (Docker build, or a local `npm run build`), this
+// server hosts the UI as well, so Railway needs one service and there is no
+// cross-origin cookie problem. API routes are registered ABOVE this, so they
+// always win; anything else falls through to index.html for the SPA.
+const FRONTEND_DIST = path.join(__dirname, '..', 'frontend', 'dist');
+if (fs.existsSync(path.join(FRONTEND_DIST, 'index.html'))) {
+  app.use(express.static(FRONTEND_DIST, { index: false, maxAge: '1h' }));
+  app.get(/^(?!\/api\/|\/health).*/, (_req, res) => {
+    res.sendFile(path.join(FRONTEND_DIST, 'index.html'));
+  });
+  console.log('[web] serving built frontend from', FRONTEND_DIST);
+}
 
 app.listen(PORT, () => {
   console.log(`EAI backend listening on :${PORT} (frontend origin: ${FRONTEND_ORIGIN})`);
