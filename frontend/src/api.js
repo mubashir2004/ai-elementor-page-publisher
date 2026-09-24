@@ -71,6 +71,14 @@ async function putJson(path, body) {
   return data;
 }
 
+/** State of a build by id — used to reattach after a dropped stream. */
+export async function getRunStatus(runId) {
+  const res = await fetch(`${BASE}/api/runs/${encodeURIComponent(runId)}`, { credentials: 'include' });
+  if (res.status === 404) return { status: 'gone' };
+  if (!res.ok) throw new Error(`Could not read build status (${res.status}).`);
+  return res.json();
+}
+
 /** Direct URL of the companion-plugin zip (used by a plain download link). */
 export function pluginDownloadUrl() {
   return `${BASE}/api/plugin/download`;
@@ -85,6 +93,17 @@ export async function getPluginInfo() {
 
 export async function testConnection(creds) {
   return postJson('/api/connect/test', creds);
+}
+
+/** Is a login already on file for this browser? (survives reloads/restarts) */
+export async function getSession() {
+  try {
+    const res = await fetch(`${BASE}/api/session`, { credentials: 'include' });
+    if (!res.ok) return { connected: false };
+    return await res.json();
+  } catch (_) {
+    return { connected: false };
+  }
 }
 
 export async function disconnect() {
@@ -234,11 +253,69 @@ export async function streamRun(path, body, handlers) {
   // died or the socket dropped mid-build, the loop just ended silently and the
   // UI sat on "generating…" forever. Track it and always report an outcome.
   let settled = false;
+  // The server sends the run id first. A build keeps running even if this
+  // stream dies, so that id lets us reattach instead of rebuilding.
+  let runId = null;
   const wrapped = {
     ...handlers,
+    onRun: (info) => {
+      runId = (info && info.runId) || null;
+      if (runId && handlers.onRun) handlers.onRun(runId);
+    },
     onDone: (r) => { settled = true; handlers.onDone && handlers.onDone(r); },
     onError: (e) => { settled = true; handlers.onError && handlers.onError(e); },
   };
+
+  /**
+   * The stream died but the build did not. Poll the run until it finishes and
+   * deliver the real outcome, so a proxy timeout or a sleeping laptop costs
+   * nothing. Only gives up when the server says the run is gone or failed.
+   */
+  async function reattach(reason) {
+    if (!runId) {
+      wrapped.onError({
+        message: `Connection to the backend was lost before the build was registered (${reason}). Nothing was published — start again.`,
+      });
+      return;
+    }
+    handlers.onReconnecting && handlers.onReconnecting();
+    const deadline = Date.now() + 45 * 60 * 1000; // builds can run ~25 min
+    let misses = 0;
+    while (Date.now() < deadline && !settled) {
+      await new Promise((r) => setTimeout(r, 5000));
+      let st;
+      try {
+        st = await getRunStatus(runId);
+        misses = 0;
+      } catch (_) {
+        // Transient: the server may be restarting or the network flaky.
+        if (++misses >= 24) break; // ~2 minutes of failures
+        continue;
+      }
+      if (st.status === 'done') {
+        handlers.onReconnected && handlers.onReconnected();
+        wrapped.onDone(st.result);
+        return;
+      }
+      if (st.status === 'error') {
+        wrapped.onError(st.error || { message: 'The build failed after the connection dropped.' });
+        return;
+      }
+      if (st.status === 'gone') {
+        wrapped.onError({
+          message: 'The connection dropped and the server is no longer tracking that build. Check your WordPress pages — it may have published — before starting again.',
+        });
+        return;
+      }
+      // Still running: keep the progress UI alive and current.
+      handlers.onProgress && handlers.onProgress(st.stage, st.detail || '');
+    }
+    if (!settled) {
+      wrapped.onError({
+        message: 'Lost the connection and the build did not finish within the reconnect window. Check your WordPress pages before starting again.',
+      });
+    }
+  }
 
   // Stall watchdog: the server sends a heartbeat every 15s, so a long silence
   // means the connection is dead, not that the model is thinking.
@@ -270,19 +347,17 @@ export async function streamRun(path, body, handlers) {
     // flush any trailing frame
     if (buffer.trim()) handleFrame(buffer, wrapped);
   } catch (e) {
-    if (!settled) {
-      wrapped.onError({ message: `Connection to the backend was lost mid-build (${e.message}). The build did not finish — check that the backend is running, then try again.` });
-    }
+    clearInterval(stallTimer);
+    // The stream broke — but the build is almost certainly still running on
+    // the server, so reattach to it rather than throwing the work away.
+    if (!settled) await reattach(e.message || 'network error');
+    return;
   } finally {
     clearInterval(stallTimer);
   }
 
   if (!settled) {
-    wrapped.onError({
-      message: stalled
-        ? 'The backend stopped responding (no heartbeat for 90 seconds) — it likely crashed or was restarted. Nothing was published; start the build again.'
-        : 'The backend closed the connection before the build finished — it likely crashed or was restarted. Nothing was published; start the build again.',
-    });
+    await reattach(stalled ? 'no heartbeat for 90 seconds' : 'the connection closed early');
   }
 }
 
@@ -301,7 +376,8 @@ function handleFrame(frame, handlers) {
     /* ignore malformed frame */
   }
 
-  if (event === 'progress') handlers.onProgress && handlers.onProgress(data.stage, data.detail);
+  if (event === 'run') handlers.onRun && handlers.onRun(data);
+  else if (event === 'progress') handlers.onProgress && handlers.onProgress(data.stage, data.detail);
   else if (event === 'done') handlers.onDone && handlers.onDone(data);
   else if (event === 'error') handlers.onError && handlers.onError(data);
 }

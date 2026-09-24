@@ -8,14 +8,15 @@
  * ============================================================
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import ConnectScreen from './components/ConnectScreen';
 import BuildScreen from './components/BuildScreen';
 import ChatBuilder from './components/ChatBuilder';
-import { disconnect } from './api';
+import { disconnect, getSession } from './api';
 
 export default function App() {
   const [connected, setConnected] = useState(false);
+  const [restoring, setRestoring] = useState(true); // checking for an existing login
   const [view, setView] = useState('build'); // 'build' | 'chat'
 
   // Lifted from ConnectScreen after a successful test; threaded into BuildScreen.
@@ -24,6 +25,23 @@ export default function App() {
   const [unsplashKey, setUnsplashKey] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
   const [brandContext, setBrandContext] = useState('');
+
+  // A reload, a closed laptop or a redeployed server must not mean retyping
+  // the site password and API key: the server session outlives all three, so
+  // ask it whether this browser is still connected before showing Connect.
+  useEffect(() => {
+    let alive = true;
+    getSession()
+      .then((s) => {
+        if (!alive || !s || !s.connected) return;
+        setElementorPro(!!s.elementorPro);
+        setAllowPro(!!s.allowPro);
+        setBrandContext(s.brandContext || '');
+        setConnected(true);
+      })
+      .finally(() => { if (alive) setRestoring(false); });
+    return () => { alive = false; };
+  }, []);
 
   async function handleDisconnect() {
     try { await disconnect(); } catch (_) { /* ignore */ }
@@ -66,7 +84,10 @@ export default function App() {
       </header>
 
       <main className="main">
-        {!connected && <ConnectScreen onConnected={handleConnected} />}
+        {restoring && !connected && (
+          <div className="card"><p className="subtitle">Checking your connection…</p></div>
+        )}
+        {!restoring && !connected && <ConnectScreen onConnected={handleConnected} />}
 
         {connected && view === 'build' && (
           <BuildScreen

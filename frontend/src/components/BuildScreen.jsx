@@ -246,6 +246,9 @@ export default function BuildScreen({
   const [running, setRunning] = useState(false);
   const [stage, setStage] = useState(null);
   const [stageDetail, setStageDetail] = useState(''); // live sub-stage detail ('38,400 chars written')
+  // True while the browser lost the stream and is polling the still-running
+  // build on the server (a dropped connection must not cost a rebuild).
+  const [reconnecting, setReconnecting] = useState(false);
   const [result, setResult] = useState(null);   // single-run result
   const [error, setError] = useState(null);
 
@@ -672,6 +675,10 @@ export default function BuildScreen({
     return new Promise((resolve) => {
       streamRun(path, body, {
         onProgress: (s, d) => { setStage(s); setStageDetail(d || ''); },
+      onReconnecting: () => setReconnecting(true),
+      onReconnected: () => setReconnecting(false),
+        onReconnecting: () => setReconnecting(true),
+        onReconnected: () => setReconnecting(false),
         onDone: (r) => resolve({ ok: true, result: r }),
         onError: (e) => resolve({ ok: false, error: e || { message: 'Run failed.' } }),
       });
@@ -782,6 +789,8 @@ export default function BuildScreen({
 
     await streamRun('/api/generate', baseGenerateBody(), {
       onProgress: (s, d) => { setStage(s); setStageDetail(d || ''); },
+      onReconnecting: () => setReconnecting(true),
+      onReconnected: () => setReconnecting(false),
       onDone: (r) => { setResult(r); setRunning(false); setStage(null); setStageDetail(''); },
       onError: (e) => { setError(e); setRunning(false); setStage(null); setStageDetail(''); },
     });
@@ -816,6 +825,8 @@ export default function BuildScreen({
     };
     await streamRun('/api/refine', body, {
       onProgress: (s, d) => { setStage(s); setStageDetail(d || ''); },
+      onReconnecting: () => setReconnecting(true),
+      onReconnected: () => setReconnecting(false),
       onDone: (r) => {
         applyResultUpdate(r, inBatch, idx);
         setRedoStack([]); // a NEW refine invalidates any redo trail

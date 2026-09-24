@@ -35,6 +35,7 @@ const { BRAND_KITS, getBrandKit } = require('./brandKits');
 const { renderPage } = require('./previewRenderer');
 const { STARTER_BRIEFS } = require('./starterBriefs');
 const geminiImageClient = require('./geminiImageClient');
+const runStore = require('./runStore');
 
 const app = express();
 const PORT = process.env.PORT || 8787;
@@ -156,9 +157,57 @@ app.post('/api/connect/test', async (req, res) => {
   }
 });
 
+/** ---------- Session status ----------
+ * The login cookie survives reloads, restarts and reboots — but the UI used
+ * to forget it and show the Connect screen anyway, forcing people to re-enter
+ * their site password and API key. This lets the app restore the session on
+ * load. Secrets (application password, API keys) are NEVER returned; only
+ * what the UI needs to render, plus flags saying a key is on file.
+ */
+app.get('/api/session', (req, res) => {
+  const s = req.session || {};
+  const creds = s.creds;
+  if (!creds) return res.json({ connected: false });
+  res.json({
+    connected: true,
+    wpUrl: creds.wpUrl,
+    wpUser: creds.wpUser,
+    claudeMode: s.claudeMode || 'api',
+    allowPro: !!s.allowPro,
+    elementorPro: !!s.allowPro,
+    brandContext: s.brandContext || '',
+    hasClaudeKey: !!s.claudeKey || s.claudeMode === 'cli',
+    hasGeminiKey: !!s.geminiKey,
+  });
+});
+
 /** ---------- Disconnect ---------- */
 app.post('/api/disconnect', (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
+});
+
+/** ---------- Reattach to a build whose connection dropped ----------
+ * A build survives a lost stream (proxy timeout, sleep, reload). The client
+ * polls this with the runId it received, and gets back the live stage, or the
+ * finished page, or the error — so nobody pays to generate the same page twice.
+ */
+app.get('/api/runs/:id', (req, res) => {
+  const rec = runStore.get(req.params.id);
+  if (!rec) {
+    return res.status(404).json({
+      error: { code: 'run_not_found', message: 'That build is no longer being tracked (older than 6 hours, or never started).' },
+    });
+  }
+  res.json({
+    id: rec.id,
+    status: rec.status,
+    stage: rec.stage,
+    detail: rec.detail || '',
+    result: rec.result || null,
+    error: rec.error || null,
+    startedAt: rec.startedAt,
+    updatedAt: rec.updatedAt,
+  });
 });
 
 /** ---------- Companion plugin download (no creds needed) ----------
@@ -680,7 +729,11 @@ async function handleGenerate(req, res, isRefine) {
   // Set up Server-Sent Events.
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
+    // no-transform stops proxies rewriting/compressing the stream, and
+    // X-Accel-Buffering disables nginx-style buffering that otherwise holds
+    // events back until the response ends (i.e. forever, mid-build).
+    'Cache-Control': 'no-cache, no-transform',
+    'X-Accel-Buffering': 'no',
     Connection: 'keep-alive',
   });
   const send = (event, data) => {
@@ -692,6 +745,11 @@ async function handleGenerate(req, res, isRefine) {
   // sees as a stream that simply ends, leaving the UI "generating" forever.
   // A comment frame every 15s keeps it alive and lets the client tell the
   // difference between "still working" and "the backend died".
+  // The build keeps running server-side even if this socket dies, so record
+  // it under an id the client can come back to.
+  const run = runStore.start({ kind: isRefine ? 'refine' : 'generate' });
+  send('run', { runId: run.id });
+
   const heartbeat = setInterval(() => {
     try { res.write(': ping\n\n'); } catch (_) { /* socket already gone */ }
   }, 15000);
@@ -845,6 +903,7 @@ async function handleGenerate(req, res, isRefine) {
       variationMode: !!body.variationMode,
     }, (stage, extra) => {
       if (stage === 'done') {
+        runStore.finish(run.id, extra);
         send('done', extra);
       } else {
         // Always send on stage CHANGE; detail updates may repeat the same
@@ -852,6 +911,7 @@ async function handleGenerate(req, res, isRefine) {
         lastStage = stage;
         const payload = { stage };
         if (extra && extra.detail) payload.detail = extra.detail;
+        runStore.update(run.id, stage, payload.detail);
         send('progress', payload);
       }
     });
@@ -862,12 +922,14 @@ async function handleGenerate(req, res, isRefine) {
     // Log the precise failure server-side so we never have to guess which step
     // (generating / validating / images / publishing) or endpoint broke.
     console.error(`[${isRefine ? 'refine' : 'generate'}] failed at stage "${lastStage || 'startup'}":`, err && err.stack ? err.stack : err);
-    send('error', {
+    const errPayload = {
       code: err.code || 'generate_failed',
       step: lastStage || 'startup',
       message: err.message,
       rawOutput: err.rawOutput || undefined, // let the UI offer a raw download
-    });
+    };
+    runStore.fail(run.id, errPayload);
+    send('error', errPayload);
     res.end();
   }
 }
