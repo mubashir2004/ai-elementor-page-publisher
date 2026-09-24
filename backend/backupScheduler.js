@@ -39,7 +39,11 @@ function dataDir() {
 }
 
 function backupDir() {
-  return process.env.EAI_BACKUP_DIR || path.join(__dirname, 'backups');
+  if (process.env.EAI_BACKUP_DIR) return process.env.EAI_BACKUP_DIR;
+  // Follow the shared data root so backups land on the mounted volume too —
+  // otherwise a redeploy throws them away with the container filesystem.
+  const root = process.env.EAI_DATA_DIR || __dirname;
+  return path.join(root, 'backups');
 }
 
 function intervalMs() {
