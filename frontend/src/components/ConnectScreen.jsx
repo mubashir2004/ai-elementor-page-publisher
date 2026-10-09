@@ -11,7 +11,14 @@
 import { useEffect, useState } from 'react';
 import { testConnection, testGeminiKey, getPluginInfo, pluginDownloadUrl } from '../api';
 
-const MODELS = ['claude-opus-4-8']; // fixed internally — Opus 4.8 is the design model
+// Model choice is the single biggest cost lever: Opus runs ~50x the price of
+// Haiku per token. Listed cheapest-first with the tradeoff stated, so the cost
+// of a build is a decision rather than a surprise on the invoice.
+const MODELS = [
+  ['claude-haiku-5-5', 'Haiku 5.5 — cheapest (~$0.10/$0.50 per M tokens)'],
+  ['claude-sonnet-5-5', 'Sonnet 5.5 — balanced (~$2/$10 per M tokens)'],
+  ['claude-opus-4-8', 'Opus 4.8 — highest design quality (~$5/$25 per M tokens)'],
+];
 
 const CHECKS = [
   ['wpReachable', 'Site reachable'],
@@ -29,7 +36,7 @@ const FIXES = {
 
 export default function ConnectScreen({ onConnected }) {
   const [form, setForm] = useState({
-    wpUrl: '', wpUser: '', wpAppPassword: '', claudeKey: '', claudeModel: MODELS[0],
+    wpUrl: '', wpUser: '', wpAppPassword: '', claudeKey: '', claudeModel: MODELS[0][0],
   });
   const [show, setShow] = useState({ pw: false, key: false });
   // The connector plugin must be installed on the WP site before connecting,
@@ -170,6 +177,15 @@ export default function ConnectScreen({ onConnected }) {
           Local Claude CLI
         </button>
       </div>
+
+      <label className="label">Model</label>
+      <select className="input" value={form.claudeModel} onChange={set('claudeModel')}>
+        {MODELS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+      </select>
+      <p className="hint">
+        Haiku builds pages for a fraction of the cost; Opus follows a reference design
+        most closely. Switch any time by reconnecting — nothing else changes.
+      </p>
 
       {claudeMode === 'api' ? (
         <>

@@ -19,7 +19,10 @@ const fs = require('fs');
 const path = require('path');
 
 const ANTHROPIC_URL = process.env.EAI_ANTHROPIC_URL || 'https://api.anthropic.com/v1/messages';
-const MODEL_DEFAULT = 'claude-opus-4-8';
+// Default model. Haiku 5.5 is ~50x cheaper than Opus 4.8 ($0.10/$0.50 per
+// MTok vs $5/$25) with the same 1M context and 128K max output. The Connect
+// screen lets the user pick a stronger model per connection.
+const MODEL_DEFAULT = 'claude-haiku-5-5';
 // Opus 4.8 supports up to 128K output tokens when streaming (we always
 // stream). At 32K a full page needed 2-3 CONTINUATION round trips, and each
 // continuation re-sends everything written so far — the single biggest
@@ -74,9 +77,11 @@ async function withConcurrencyGate(fn) {
 // it only for the known no-sampling model families.
 function modelAcceptsTemperature(model) {
   const m = String(model || '');
-  if (/opus-4-[789]\b/.test(m)) return false;            // Opus 4.7 / 4.8 / 4.9
-  if (/(sonnet|fable|mythos)-5\b/.test(m)) return false; // Sonnet 5, Fable 5, Mythos 5
-  return true;
+  // ALLOWLIST, deliberately: every model from Opus 4.7 / the 5.x generation
+  // onward rejects temperature (and top_p/top_k) with HTTP 400. A blocklist
+  // silently breaks the next model that ships, so only models known to accept
+  // sampling params get one.
+  return /(opus-4-[56]|sonnet-4-[56]|haiku-4-5|claude-3)\b/.test(m);
 }
 
 // Pro-only block markers inside page-gen.v2.md (lines must match exactly).

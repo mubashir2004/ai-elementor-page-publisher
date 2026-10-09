@@ -1020,3 +1020,33 @@ test('usability floor: carousels get visible controls, tiny text raised with lin
   assert.equal(small.typography_line_height.size, 1.6, 'line-height added');
   assert.equal(plain.typography_font_size, undefined, 'unsized text untouched');
 });
+
+test('model config: temperature is sent ONLY to models that still accept it', () => {
+  // Models from Opus 4.7 / the 5.x generation on reject temperature with a 400,
+  // so a wrong answer here breaks every build on that model.
+  const fs = require('fs');
+  const src = fs.readFileSync(require('path').join(__dirname, '..', 'claudeClient.js'), 'utf8');
+  const body = src.match(/function modelAcceptsTemperature[\s\S]*?\n}/)[0];
+  // eslint-disable-next-line no-new-func
+  const accepts = new Function(`return ${body}`)();
+
+  for (const m of ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5',
+    'claude-opus-4-8', 'claude-opus-4-7', 'claude-fable-5-1']) {
+    assert.equal(accepts(m), false, `${m} must NOT receive temperature`);
+  }
+  for (const m of ['claude-haiku-4-5', 'claude-sonnet-4-6', 'claude-opus-4-5']) {
+    assert.equal(accepts(m), true, `${m} still accepts temperature`);
+  }
+  // An unknown/future model must default to the SAFE side (omit it).
+  assert.equal(accepts('claude-something-9'), false, 'unknown models omit temperature');
+});
+
+test('model config: the default model and the UI list agree', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const client = fs.readFileSync(path.join(__dirname, '..', 'claudeClient.js'), 'utf8');
+  const def = client.match(/const MODEL_DEFAULT = '([^']+)'/)[1];
+  const ui = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'frontend', 'src', 'components', 'ConnectScreen.jsx'), 'utf8');
+  assert.ok(ui.includes(`'${def}'`), `UI model list must offer the default (${def})`);
+});
