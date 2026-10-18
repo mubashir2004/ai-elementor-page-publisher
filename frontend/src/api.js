@@ -110,11 +110,6 @@ export async function disconnect() {
   return postJson('/api/disconnect', {});
 }
 
-/** Run one real Gemini image generation to prove the key works. */
-export async function testGeminiKey(geminiKey) {
-  return postJson('/api/gemini/test', { geminiKey });
-}
-
 /** Fetch the built-in starter briefs (ready-to-use generation prompts). No credentials required. */
 export async function getStarterBriefs() {
   const res = await fetch(`${BASE}/api/starter-briefs`, { credentials: 'include' });
