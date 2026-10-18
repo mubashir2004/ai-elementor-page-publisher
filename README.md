@@ -75,7 +75,9 @@ the UI, on a Playwright base image so the website scanner has a real Chromium.
 
    | Variable | Value |
    |---|---|
-   | `SESSION_SECRET` | long random secret, at least 32 characters |\n   | `CREDENTIAL_ENCRYPTION_KEY` | 32 random bytes as 64 hex characters (`openssl rand -hex 32`) |\n   | `ANTHROPIC_API_KEY` | your platform-owned Anthropic key, set only in Railway Variables |
+   | `SESSION_SECRET` | long random secret, at least 32 characters |
+   | `CREDENTIAL_ENCRYPTION_KEY` | 32 random bytes as 64 hex characters (`openssl rand -hex 32`) |
+   | `ANTHROPIC_API_KEY` | your platform-owned Anthropic key, set only in Railway Variables |
    | `NODE_ENV` | `production` (enables secure cookies and proxy trust) |
    | `EAI_DATA_DIR` | `/data` (already the image default; set it if your mount path differs) |
    | `FRONTEND_ORIGIN` | only for a split deploy — the URL of a separately hosted UI |
@@ -97,10 +99,7 @@ Render's **free tier cannot run this app** — 512 MB RAM (Chromium and image
 processing need more), no persistent disk, and it sleeps when idle. Use a paid
 instance with a disk attached.
 
-**Bring your own keys.** Every user enters their own Claude API key (and
-optionally a Gemini key) on the Connect screen, held in their own server-side
-session — the deployment owner's keys are never used or stored, so a public
-instance costs you nothing in model spend.
+**Public deployment and costs.** Visitors connect with their WordPress URL, username and Application Password only. The platform's `ANTHROPIC_API_KEY` pays for every AI operation. This setup intentionally has no customer accounts or per-customer usage quotas, so anonymous visitors can consume your API budget. That is a real financial risk: do not expose the service publicly until you accept it and set provider-level billing alerts. Gemini image generation and customer-supplied image API keys are disabled; the UI uses stock images.
 
 **Not Vercel/Netlify.** A page build runs 10–25 minutes on a live SSE stream;
 serverless functions cap out long before that, have no persistent disk for
@@ -112,7 +111,9 @@ long-lived container.
 ```bash
 docker build -t eai-publisher .
 docker run -p 8787:8787 -v eai-data:/data \
-  -e SESSION_SECRET=replace-with-32-plus-random-characters \\\n  -e CREDENTIAL_ENCRYPTION_KEY=$(openssl rand -hex 32) \\\n  -e ANTHROPIC_API_KEY=your-server-side-key eai-publisher
+  -e SESSION_SECRET=replace-with-32-plus-random-characters \\
+  -e CREDENTIAL_ENCRYPTION_KEY=$(openssl rand -hex 32) \\
+  -e ANTHROPIC_API_KEY=your-server-side-key eai-publisher
 # open http://localhost:8787
 ```
 
