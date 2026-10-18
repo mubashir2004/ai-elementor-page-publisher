@@ -11,14 +11,8 @@
 import { useEffect, useState } from 'react';
 import { testConnection, getPluginInfo, pluginDownloadUrl } from '../api';
 
-// Model choice is the single biggest cost lever: Opus runs ~50x the price of
-// Haiku per token. Listed cheapest-first with the tradeoff stated, so the cost
-// of a build is a decision rather than a surprise on the invoice.
-const MODELS = [
-  ['claude-haiku-5-5', 'Haiku 5.5 — cheapest (~$0.10/$0.50 per M tokens)'],
-  ['claude-sonnet-5-5', 'Sonnet 5.5 — balanced (~$2/$10 per M tokens)'],
-  ['claude-opus-4-8', 'Opus 4.8 — highest design quality (~$5/$25 per M tokens)'],
-];
+// Public deployment uses one fixed, server-selected model.
+const CLAUDE_MODEL = 'claude-haiku-5-5';
 
 const CHECKS = [
   ['wpReachable', 'Site reachable'],
@@ -36,7 +30,7 @@ const FIXES = {
 
 export default function ConnectScreen({ onConnected }) {
   const [form, setForm] = useState({
-    wpUrl: '', wpUser: '', wpAppPassword: '', claudeModel: MODELS[0][0],
+    wpUrl: '', wpUser: '', wpAppPassword: '',
   });
   const [show, setShow] = useState({ pw: false });
   // The connector plugin must be installed on the WP site before connecting,
@@ -75,7 +69,7 @@ export default function ConnectScreen({ onConnected }) {
     }
     setBusy(true);
     try {
-      const r = await testConnection({ wpUrl: form.wpUrl, wpUser: form.wpUser, wpAppPassword: form.wpAppPassword, claudeModel: form.claudeModel, allowPro, brandContext });
+      const r = await testConnection({ wpUrl: form.wpUrl, wpUser: form.wpUser, wpAppPassword: form.wpAppPassword, allowPro, brandContext });
       setResult(r);
       // Default the widget-mode toggle to whatever the site supports.
       setAllowPro(!!r.elementorPro);
@@ -88,7 +82,7 @@ export default function ConnectScreen({ onConnected }) {
 
   function handleContinue() {
     onConnected({
-      wpUrl: form.wpUrl, wpUser: form.wpUser, wpAppPassword: form.wpAppPassword, claudeModel: form.claudeModel,
+      wpUrl: form.wpUrl, wpUser: form.wpUser, wpAppPassword: form.wpAppPassword,
       elementorPro: !!(result && result.elementorPro), allowPro, brandContext,
     });
   }
@@ -137,15 +131,6 @@ export default function ConnectScreen({ onConnected }) {
         </button>
       </div>
       <p className="hint">WordPress Admin → Users → Profile → Application Passwords → add new.</p>
-
-      <label className="label">AI model</label>
-      <select className="input" value={form.claudeModel} onChange={set('claudeModel')}>
-        {MODELS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
-      </select>
-      <p className="hint">
-        Haiku builds pages for a fraction of the cost; Opus follows a reference design
-        most closely. Switch any time by reconnecting — nothing else changes.
-      </p>
 
       {err && <div className="alert-error">{err}</div>}
 
