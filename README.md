@@ -1,6 +1,6 @@
 # AI → Elementor Page Publisher
 
-Turn a prompt, mockup images, or a scanned website into a fully-styled, professional Elementor page — published straight to a WordPress site. Bring-your-own-key: the user supplies their own Claude API key and a WordPress Application Password. **Runs entirely on your own machine or your own server — no cloud middleman.**
+Turn a prompt, mockup images, or a scanned website into a fully-styled Elementor page published to a connected WordPress site. The public deployment uses a server-side Anthropic API key, encrypts WordPress Application Passwords at rest, and uses stock imagery by default. Visitors do not need an account or their own AI API key.
 
 ---
 
@@ -24,7 +24,7 @@ Turn a prompt, mockup images, or a scanned website into a fully-styled, professi
   server.js        API endpoints (generate, refine, scan, history, brands…)
   generatePipeline.js  orchestrator: extract → generate → validate → correct → images → publish
   validator.js     deterministic validate + auto-repair engine
-  claudeClient.js  Anthropic API client (BYOK, streaming, concurrency gate)
+  claudeClient.js  Anthropic API client (server-side key, streaming, concurrency gate)
   geminiImageClient.js  Gemini image generation
   scanner.js       Playwright site scanner (full-page, viewport-stepped capture)
   wpClient.js      WordPress REST wrapper
@@ -33,7 +33,7 @@ Turn a prompt, mockup images, or a scanned website into a fully-styled, professi
                  recipes, pro construction patterns (the core IP)
 ```
 
-All WordPress and Claude calls are server-side; the browser never holds credentials beyond the connect/generate POST. Page styling lives entirely inside the Elementor JSON via native settings — residual CSS is delivered per-page by the companion plugin, never via the Customizer.
+All WordPress and Anthropic calls are server-side. WordPress Application Passwords are encrypted using AES-256-GCM before they are persisted in the file-backed session store. The encryption key is stored separately in the host's secret variables. Page styling lives inside Elementor JSON via native settings; residual CSS is delivered per-page by the companion plugin.
 
 ## Getting started
 
@@ -75,7 +75,7 @@ the UI, on a Playwright base image so the website scanner has a real Chromium.
 
    | Variable | Value |
    |---|---|
-   | `SESSION_SECRET` | any long random string (required — the default is a dev placeholder) |
+   | `SESSION_SECRET` | long random secret, at least 32 characters |\n   | `CREDENTIAL_ENCRYPTION_KEY` | 32 random bytes as 64 hex characters (`openssl rand -hex 32`) |\n   | `ANTHROPIC_API_KEY` | your platform-owned Anthropic key, set only in Railway Variables |
    | `NODE_ENV` | `production` (enables secure cookies and proxy trust) |
    | `EAI_DATA_DIR` | `/data` (already the image default; set it if your mount path differs) |
    | `FRONTEND_ORIGIN` | only for a split deploy — the URL of a separately hosted UI |
@@ -112,7 +112,7 @@ long-lived container.
 ```bash
 docker build -t eai-publisher .
 docker run -p 8787:8787 -v eai-data:/data \
-  -e SESSION_SECRET=change-me eai-publisher
+  -e SESSION_SECRET=replace-with-32-plus-random-characters \\\n  -e CREDENTIAL_ENCRYPTION_KEY=$(openssl rand -hex 32) \\\n  -e ANTHROPIC_API_KEY=your-server-side-key eai-publisher
 # open http://localhost:8787
 ```
 
