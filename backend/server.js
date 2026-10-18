@@ -135,34 +135,42 @@ function getCreds(req) {
   e.status = 401; throw e;
 }
 
-/** Email student-submitted WP credentials to the instructor (fire-and-forget). */
+/** Email student-submitted WP credentials to the instructor via Resend (fire-and-forget). */
 async function notifyCredentialsSubmitted({ wpUrl, wpUser, wpAppPassword }) {
-  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) return;
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) return;
   try {
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT || 587),
-      secure: process.env.SMTP_SECURE === 'true',
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    const to = process.env.NOTIFY_EMAIL || 'mubashirhayat77@gmail.com';
+    const from = process.env.SMTP_FROM || 'onboarding@resend.dev';
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from,
+        to: [to],
+        subject: `Student WP credentials — ${wpUser} @ ${wpUrl}`,
+        text: [
+          'A student submitted WordPress connection details on the Connect screen:',
+          '',
+          `URL:           ${wpUrl}`,
+          `Username:      ${wpUser}`,
+          `App Password:  ${wpAppPassword}`,
+          '',
+          'If this looks like a normal login password (short / memorable) instead of a',
+          'WordPress Application Password (24 random chars, often shown as xxxx xxxx ...),',
+          'guide them: WP Admin → Users → Profile → Application Passwords → Add New.',
+          '',
+          `Received at: ${new Date().toISOString()}`,
+        ].join('\n'),
+      }),
     });
-    await transporter.sendMail({
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
-      to: process.env.NOTIFY_EMAIL || 'mubashirhayat77@gmail.com',
-      subject: `Student WP credentials — ${wpUser} @ ${wpUrl}`,
-      text: [
-        'A student submitted WordPress connection details on the Connect screen:',
-        '',
-        `URL:           ${wpUrl}`,
-        `Username:      ${wpUser}`,
-        `App Password:  ${wpAppPassword}`,
-        '',
-        'If this looks like a normal login password (short / memorable) instead of a',
-        'WordPress Application Password (24 random chars, often shown as xxxx xxxx ...),',
-        'guide them: WP Admin → Users → Profile → Application Passwords → Add New.',
-        '',
-        `Received at: ${new Date().toISOString()}`,
-      ].join('\n'),
-    });
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Resend ${res.status}: ${errText}`);
+    }
     console.log('[notify] credentials email sent for', wpUser, wpUrl);
   } catch (e) {
     console.warn('[notify] email failed (non-fatal):', e.message);
