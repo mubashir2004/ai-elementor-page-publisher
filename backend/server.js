@@ -112,7 +112,7 @@ function getCreds(req) {
   if (s.credsEncrypted) {
     // Remove obsolete customer-supplied provider keys from older session files.
     delete s.claudeKey; delete s.geminiKey; delete s.unsplashKey; delete s.claudeMode;
-    try { return decryptJson(s.credsEncrypted);
+    try { return decryptJson(s.credsEncrypted); }
     catch (_) {
       const e = new Error('Saved WordPress credentials cannot be decrypted. Reconnect your site.');
       e.status = 401; e.code = 'credentials_unavailable'; throw e;
