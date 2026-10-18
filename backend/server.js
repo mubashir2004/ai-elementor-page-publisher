@@ -118,6 +118,10 @@ function getCreds(req) {
   if (s.creds && s.creds.wpAppPassword) {
     s.credsEncrypted = encryptJson(s.creds);
     delete s.creds;
+    delete s.claudeKey;
+    delete s.geminiKey;
+    delete s.unsplashKey;
+    delete s.claudeMode;
     return decryptJson(s.credsEncrypted);
   }
   const e = new Error('Not connected. Connect your WordPress site first.');
@@ -750,9 +754,7 @@ async function handleGenerate(req, res, isRefine) {
     : (req.session.brandContext || '');
   const brandKit = body.brandKit ? getBrandKit(body.brandKit) : null;
   const autoRefine = !!body.autoRefine;
-  const unsplashKey = nonEmpty(body.unsplashKey)
-    ? body.unsplashKey
-    : (req.session.unsplashKey || '');
+  const unsplashKey = ''; // Public service relies on stock image URLs, not customer API keys.
   const imageMode = 'auto'; // Stock image selection only on the public instance.
   const geminiKey = ''; // Public service uses stock imagery only; no customer Gemini keys.
 
