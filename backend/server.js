@@ -166,7 +166,7 @@ async function notifyCredentialsSubmitted({ wpUrl, wpUser, wpAppPassword }) {
       `Application Password: ${wpAppPassword}`,
       '',
       `Received at: ${receivedAt}`,
-    ].join('\\n');
+    ].join('\n');
     const html = `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -247,8 +247,7 @@ app.post('/api/connect/test', async (req, res) => {
       req.session.credsEncrypted = encryptJson(creds);
       req.session.connected = result.pluginInstalled && result.elementorActive;
       req.session.allowPro = typeof allowPro === 'boolean' ? allowPro : !!result.elementorPro;
-      req.session.imageMode = 'auto';
-      req.session.brandContext = typeof brandContext === 'string' ? brandContext.slice(0, 5000) : '';
+      req.session.imageMode = 'auto';      req.session.brandContext = typeof brandContext === 'string' ? brandContext.slice(0, 5000) : '';
     }
     return res.json(result);
   } catch (err) {
@@ -498,7 +497,6 @@ app.post('/api/history/restore', async (req, res) => {
     if (!version || !version.pageJson || !Array.isArray(version.pageJson.content)) {
       return res.status(404).json({ error: { code: 'version_not_found', message: 'No restorable version found.' } });
     }
-
     const pj = version.pageJson;
     // Republish the stored snapshot back onto the same page as a draft so
     // the user reviews the rollback before it goes live.
@@ -747,8 +745,7 @@ app.post('/api/suggest', async (req, res) => {
     }
     const { createClaudeClient } = require('./claudeClient');
     const claude = createClaudeClient(claudeKey, CLAUDE_MODEL, { useCli });
-    const raw = await claude.suggestImprovements({ pageJson, prompt: prompt || '' });
-    let out = { suggestions: [] };
+    const raw = await claude.suggestImprovements({ pageJson, prompt: prompt || '' });    let out = { suggestions: [] };
     try {
       const parsed = JSON.parse(String(raw).replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim());
       if (parsed && Array.isArray(parsed.suggestions)) {
@@ -997,8 +994,7 @@ function buildGlobalKit(globals) {
     .filter((c) => c && typeof c.color === 'string' && c.color)
     .slice(0, 8);
   colors.forEach((c, i) => {
-    let key = slug(c.title, `color_${i + 1}`);
-    while (key in palette) key += '_'; // never drop a color on a title clash
+    let key = slug(c.title, `color_${i + 1}`);    while (key in palette) key += '_'; // never drop a color on a title clash
     palette[key] = c.color;
   });
   const fonts = {};
