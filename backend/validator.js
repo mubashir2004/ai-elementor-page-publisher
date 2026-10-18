@@ -28,9 +28,9 @@
 
 const MAX_PAGE_BYTES = 3 * 1024 * 1024; // 3 MB
 const MAX_CSS_BYTES = 50 * 1024;        // 50 KB
-// Local lenient repair handles the common cases (trailing commas, a truncated
-// tail) instantly, so we only need a single slow model round-trip as a fallback.
-const MAX_REPAIR_RETRIES = 1;
+// Large multi-section pages can produce malformed/truncated JSON under load.
+// Try several model repairs after local salvage before failing the run.
+const MAX_REPAIR_RETRIES = 3;
 
 // The native/free Elementor widget types allowed to survive validation.
 const FREE_WIDGET_WHITELIST = new Set([
@@ -266,7 +266,7 @@ async function parseWithRepair(rawText, claudeClient, repairs) {
     }
   }
 
-  const e = new Error('Could not obtain valid JSON after repair attempts.');
+  const e = new Error(`Could not obtain valid JSON after ${MAX_REPAIR_RETRIES} repair attempts. Last parse error: ${lastErr}. Try reducing the number of sections or retry the validation step.`);
   e.rawOutput = rawText; // preserve for the UI download-raw action
   throw e;
 }

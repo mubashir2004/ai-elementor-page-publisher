@@ -117,21 +117,24 @@ const EXAMPLES = [
   'A modern SaaS product page for an invoicing tool: hero, features, pricing tiers, FAQ, sign-up CTA.',
 ];
 
-// "Unlimited" in practice is bounded by the Claude API's ~32 MB request
-// ceiling — 30 auto-optimized references is the safe maximum that fits.
-const MAX_IMAGES = 30;
-// No per-file size cap: any reference image (30 MB, 100 MB, ...) is
-// auto-downscaled in the browser to an API-safe size (fileToOptimizedBase64).
-// PDFs are rasterized page by page, capped at 30 pages.
-const MAX_PDF_PAGES = 30;
-// Tiered per-image budgets: past 3 references shrink each image; past 10,
-// shrink harder so even a 30-reference batch stays under the request ceiling.
+// Support large reference sets for long, multi-section landing pages.
+// This is a high practical ceiling rather than literal infinity: all selected
+// references are sent with the generation request, which has transport/provider
+// payload limits. At large counts we compress aggressively to stay within them.
+const MAX_IMAGES = 100;
+const MAX_PDF_PAGES = 100;
 const MANY_IMAGES_THRESHOLD = 3;
 const SMALL_TARGET_BYTES = 1.5 * 1024 * 1024;
 const SMALL_MAX_EDGE = 1600;
 const LOTS_IMAGES_THRESHOLD = 10;
 const TINY_TARGET_BYTES = 0.7 * 1024 * 1024;
 const TINY_MAX_EDGE = 1280;
+const VERY_MANY_IMAGES_THRESHOLD = 30;
+const BULK_TARGET_BYTES = 180 * 1024;
+const BULK_MAX_EDGE = 960;
+const EXTREME_IMAGES_THRESHOLD = 60;
+const EXTREME_TARGET_BYTES = 100 * 1024;
+const EXTREME_MAX_EDGE = 800;
 
 /* ---- Multi-page + variations helpers ---- */
 
@@ -457,12 +460,17 @@ export default function BuildScreen({
       setError({ message: `Limit is ${MAX_IMAGES} references — remove one first.` });
       return [];
     }
-    // Tiered per-image budgets so even a 30-reference batch stays under the
-    // Claude request ceiling: >3 refs = smaller, >10 refs = smallest.
+    // Compress progressively more as the user adds references. This allows
+    // 50-section pages to attach a large visual reference set without sending
+    // full-resolution images into the model request.
     const total = currentCount + files.length;
-    const budget = total > LOTS_IMAGES_THRESHOLD
-      ? [TINY_TARGET_BYTES, TINY_MAX_EDGE]
-      : (total > MANY_IMAGES_THRESHOLD ? [SMALL_TARGET_BYTES, SMALL_MAX_EDGE] : null);
+    const budget = total > EXTREME_IMAGES_THRESHOLD
+      ? [EXTREME_TARGET_BYTES, EXTREME_MAX_EDGE]
+      : total > VERY_MANY_IMAGES_THRESHOLD
+        ? [BULK_TARGET_BYTES, BULK_MAX_EDGE]
+        : total > LOTS_IMAGES_THRESHOLD
+          ? [TINY_TARGET_BYTES, TINY_MAX_EDGE]
+          : (total > MANY_IMAGES_THRESHOLD ? [SMALL_TARGET_BYTES, SMALL_MAX_EDGE] : null);
     const next = [];
     for (const f of files) {
       if (next.length >= room) break;
