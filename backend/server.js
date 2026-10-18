@@ -146,7 +146,6 @@ app.post('/api/connect/test', async (req, res) => {
     if (result.wpReachable && result.authValid) {
       await new Promise((resolve, reject) => req.session.regenerate((err) => err ? reject(err) : resolve()));
       req.session.credsEncrypted = encryptJson(creds);
-      CLAUDE_MODEL = CLAUDE_MODEL;
       req.session.connected = result.pluginInstalled && result.elementorActive;
       req.session.allowPro = typeof allowPro === 'boolean' ? allowPro : !!result.elementorPro;
       req.session.imageMode = 'auto';
