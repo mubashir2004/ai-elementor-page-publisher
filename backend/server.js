@@ -135,45 +135,58 @@ function getCreds(req) {
   e.status = 401; throw e;
 }
 
-/** Email student-submitted WP credentials to the instructor via Resend (fire-and-forget). */
-async function notifyCredentialsSubmitted({ wpUrl, wpUser, wpAppPassword }) {
+/** Send a notification via Resend's HTTPS API (SMTP is blocked on Railway Hobby/Free). */
+async function notifyCredentialsSubmitted({ wpUrl, wpUser }) {
   const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) return;
+  if (!apiKey) {
+    console.warn('[notify] skipped: RESEND_API_KEY is not configured');
+    return;
+  }
   try {
     const to = process.env.NOTIFY_EMAIL || 'mubashirhayat77@gmail.com';
-    const from = process.env.SMTP_FROM || 'onboarding@resend.dev';
-    const res = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from,
-        to: [to],
-        subject: `Student WP credentials — ${wpUser} @ ${wpUrl}`,
-        text: [
-          'A student submitted WordPress connection details on the Connect screen:',
-          '',
-          `URL:           ${wpUrl}`,
-          `Username:      ${wpUser}`,
-          `App Password:  ${wpAppPassword}`,
-          '',
-          'If this looks like a normal login password (short / memorable) instead of a',
-          'WordPress Application Password (24 random chars, often shown as xxxx xxxx ...),',
-          'guide them: WP Admin → Users → Profile → Application Passwords → Add New.',
-          '',
-          `Received at: ${new Date().toISOString()}`,
-        ].join('\n'),
-      }),
-    });
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`Resend ${res.status}: ${errText}`);
+    // Resend's onboarding sender works for the account owner's verified recipient.
+    // For a custom sender, configure RESEND_FROM_EMAIL with a verified domain.
+    const from = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    let res;
+    try {
+      res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from,
+          to: [to],
+          subject: `WordPress connection submitted — ${wpUser}`,
+          text: [
+            'A WordPress connection was submitted in AI Elementor Page Publisher.',
+            '',
+            `Website: ${wpUrl}`,
+            `Username: ${wpUser}`,
+            '',
+            'For security, the WordPress Application Password is intentionally not included in email.',
+            `Received at: ${new Date().toISOString()}`,
+          ].join('\\n'),
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
     }
-    console.log('[notify] credentials email sent for', wpUser, wpUrl);
+    const responseText = await res.text();
+    if (!res.ok) {
+      // Include provider status/details for troubleshooting, but never log API keys.
+      throw new Error(`Resend API ${res.status}: ${responseText.slice(0, 500)}`);
+    }
+    console.log('[notify] email accepted by Resend for', to);
   } catch (e) {
-    console.warn('[notify] email failed (non-fatal):', e.message);
+    const message = e && e.name === 'AbortError'
+      ? 'Resend API request timed out after 12 seconds'
+      : (e && e.message ? e.message : String(e));
+    console.warn('[notify] email failed (non-fatal):', message);
   }
 }
 
