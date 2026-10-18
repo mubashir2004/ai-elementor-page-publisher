@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { testConnection, testGeminiKey, getPluginInfo, pluginDownloadUrl } from '../api';
+import { testConnection, getPluginInfo, pluginDownloadUrl } from '../api';
 
 // Model choice is the single biggest cost lever: Opus runs ~50x the price of
 // Haiku per token. Listed cheapest-first with the tradeoff stated, so the cost
@@ -36,9 +36,9 @@ const FIXES = {
 
 export default function ConnectScreen({ onConnected }) {
   const [form, setForm] = useState({
-    wpUrl: '', wpUser: '', wpAppPassword: '', claudeKey: '', claudeModel: MODELS[0][0],
+    wpUrl: '', wpUser: '', wpAppPassword: '', claudeModel: MODELS[0][0],
   });
-  const [show, setShow] = useState({ pw: false, key: false });
+  const [show, setShow] = useState({ pw: false });
   // The connector plugin must be installed on the WP site before connecting,
   // so the zip is offered right here (step 1) instead of being hunted down.
   const [plugin, setPlugin] = useState({ available: false, version: '' });
@@ -56,28 +56,12 @@ export default function ConnectScreen({ onConnected }) {
 
   // Post-test options, lifted to App on Continue.
   const [allowPro, setAllowPro] = useState(false);
-  const [unsplashKey, setUnsplashKey] = useState('');
-  const [geminiKey, setGeminiKey] = useState('');
   const [brandContext, setBrandContext] = useState('');
-  // Gemini key test: idle | testing | {ok, preview?, error?}
-  const [geminiTest, setGeminiTest] = useState(null);
-
-  async function handleGeminiTest() {
-    if (!geminiKey.trim() || geminiTest === 'testing') return;
-    setGeminiTest('testing');
-    try {
-      const r = await testGeminiKey(geminiKey.trim());
-      setGeminiTest(r);
-    } catch (e) {
-      setGeminiTest({ ok: false, error: e.message || 'Test failed.' });
-    }
-  }
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const allGreen = result &&
-    result.wpReachable && result.authValid && result.pluginInstalled && result.elementorActive &&
-    (claudeMode !== 'cli' || result.claudeCli);
+    (result.wpReachable && result.authValid && result.pluginInstalled && result.elementorActive);
 
   async function handleTest() {
     setErr('');
@@ -86,13 +70,13 @@ export default function ConnectScreen({ onConnected }) {
       setErr('Site URL must start with https://');
       return;
     }
-    if (!form.wpUser || !form.wpAppPassword || (claudeMode === 'api' && !form.claudeKey)) {
+    if (!form.wpUser || !form.wpAppPassword) {
       setErr('All fields are required.');
       return;
     }
     setBusy(true);
     try {
-      const r = await testConnection({ ...form, claudeMode, unsplashKey, geminiKey, brandContext });
+      const r = await testConnection({ wpUrl: form.wpUrl, wpUser: form.wpUser, wpAppPassword: form.wpAppPassword, claudeModel: form.claudeModel, allowPro, brandContext });
       setResult(r);
       // Default the widget-mode toggle to whatever the site supports.
       setAllowPro(!!r.elementorPro);
@@ -105,20 +89,15 @@ export default function ConnectScreen({ onConnected }) {
 
   function handleContinue() {
     onConnected({
-      ...form,
-      claudeMode,
-      elementorPro: !!(result && result.elementorPro),
-      allowPro,
-      unsplashKey,
-      geminiKey,
-      brandContext,
+      wpUrl: form.wpUrl, wpUser: form.wpUser, wpAppPassword: form.wpAppPassword, claudeModel: form.claudeModel,
+      elementorPro: !!(result && result.elementorPro), allowPro, brandContext,
     });
   }
 
   return (
     <div className="card">
       <h1 className="title">Connect your site</h1>
-      <p className="subtitle">Credentials are held only in your server session. Nothing is stored to disk.</p>
+            <p className="subtitle">Connect your WordPress site. AI generation runs securely using this service's server-side provider configuration.</p>
 
       {/* Step 1: install the companion plugin on the WordPress site. */}
       <div className="plugin-step">
@@ -160,25 +139,7 @@ export default function ConnectScreen({ onConnected }) {
       </div>
       <p className="hint">WordPress Admin → Users → Profile → Application Passwords → add new.</p>
 
-      <label className="label">Claude access</label>
-      <div className="seg">
-        <button
-          type="button"
-          className={claudeMode === 'api' ? 'seg-btn active' : 'seg-btn'}
-          onClick={() => setClaudeMode('api')}
-        >
-          API key
-        </button>
-        <button
-          type="button"
-          className={claudeMode === 'cli' ? 'seg-btn active' : 'seg-btn'}
-          onClick={() => setClaudeMode('cli')}
-        >
-          Local Claude CLI
-        </button>
-      </div>
-
-      <label className="label">Model</label>
+            <label className="label">Claude model</label>
       <select className="input" value={form.claudeModel} onChange={set('claudeModel')}>
         {MODELS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
       </select>
@@ -189,28 +150,7 @@ export default function ConnectScreen({ onConnected }) {
 
       {claudeMode === 'api' ? (
         <>
-          <label className="label">Claude API key</label>
-          <div className="input-row">
-            <input
-              className="input"
-              type={show.key ? 'text' : 'password'}
-              placeholder="sk-ant-..."
-              value={form.claudeKey}
-              onChange={set('claudeKey')}
-            />
-            <button type="button" className="ghost" onClick={() => setShow((s) => ({ ...s, key: !s.key }))}>
-              {show.key ? 'Hide' : 'Show'}
-            </button>
-          </div>
-          <p className="hint">Get one at console.anthropic.com. Used only server-side.</p>
-        </>
-      ) : (
-        <p className="hint">
-          Uses the Claude Code CLI installed on THIS machine and its own login — no API key
-          needed. Install once with <code>npm install -g @anthropic-ai/claude-code</code>, then
-          run <code>claude</code> in a terminal and sign in. The connection test checks it works.
-        </p>
-      )}
+          
 
       {/* Model is fixed internally to Claude Opus 4.8 — the strongest design
           model. No user-facing selector (per product decision). */}
@@ -279,44 +219,6 @@ export default function ConnectScreen({ onConnected }) {
               : 'Elementor Pro was not detected — only free widgets can be used.'}
           </p>
 
-          <label className="label">Gemini API key (optional)</label>
-          <div className="input-row">
-            <input
-              className="input"
-              type={show.gemini ? 'text' : 'password'}
-              placeholder="Enables AI-generated images (choose 'AI-generated' on Build)"
-              value={geminiKey}
-              onChange={(e) => setGeminiKey(e.target.value)}
-            />
-            <button type="button" className="ghost" onClick={() => setShow((s) => ({ ...s, gemini: !s.gemini }))}>
-              {show.gemini ? 'Hide' : 'Show'}
-            </button>
-            <button
-              type="button"
-              className="ghost"
-              disabled={!geminiKey.trim() || geminiTest === 'testing'}
-              onClick={handleGeminiTest}
-            >
-              {geminiTest === 'testing' ? 'Generating…' : 'Test'}
-            </button>
-          </div>
-          {geminiTest && geminiTest !== 'testing' && (
-            geminiTest.ok ? (
-              <p className="hint" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <img
-                  src={geminiTest.preview}
-                  alt="Gemini test image"
-                  style={{ width: 56, height: 56, objectFit: 'cover', borderRadius: 8 }}
-                />
-                <span>✅ Key works — this image was just generated by Gemini. AI image generation is ready.</span>
-              </p>
-            ) : (
-              <p className="hint" style={{ color: '#f87171' }}>
-                ❌ {geminiTest.error || 'The key did not produce an image.'}
-              </p>
-            )
-          )}
-          <p className="hint">Get one at aistudio.google.com. Generates images with Gemini instead of stock photos. Used only server-side. Click Test to generate a sample image and confirm the key works.</p>
 
           <label className="label">Brand context / guardrails (optional)</label>
           <textarea
