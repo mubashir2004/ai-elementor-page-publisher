@@ -2668,17 +2668,11 @@ export default function BuildScreen({
           </div>
         </div>
         <div>
-          {/* Image source */}
+          {/* Public deployment uses stock images only. */}
           <label className="label">Images</label>
-          <select className="input" value={imageMode === 'unsplash' ? 'auto' : imageMode} onChange={(e) => setImageMode(e.target.value)}>
-            <option value="auto">Auto — model picks stock URLs</option>
-            <option value="gemini">AI-generated (Gemini){geminiKey ? '' : ' — needs key from Connect'}</option>
-          </select>
+          <p className="hint">Stock images are selected automatically and copied into your WordPress Media Library. AI image generation is disabled on this public instance.</p>
         </div>
       </div>
-      {imageMode === 'gemini' && !geminiKey && (
-        <p className="hint">Add a Gemini API key on the Connect screen to enable AI image generation.</p>
-      )}
 
       {/* Header handling */}
       <label className="label">Header</label>
