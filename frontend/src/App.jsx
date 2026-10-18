@@ -111,7 +111,7 @@ export default function App() {
         )}
       </main>
 
-      <footer className="foot">Runs locally · backend :8787 · frontend :5173</footer>
+      <footer className="foot">AI generation runs on the service backend. WordPress credentials are encrypted at rest.</footer>
     </div>
   );
 }
