@@ -45,6 +45,7 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 // Everything stateful lives under one root so a hosting volume can be mounted
 // at a single path (Railway: set EAI_DATA_DIR to the mount, e.g. /data).
 const DATA_DIR = process.env.EAI_DATA_DIR || path.join(__dirname, 'data');
+const CLAUDE_MODEL = 'claude-haiku-5-5';
 
 if (IS_PROD) {
   for (const [name, value] of Object.entries({ SESSION_SECRET: process.env.SESSION_SECRET, CREDENTIAL_ENCRYPTION_KEY: process.env.CREDENTIAL_ENCRYPTION_KEY, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY })) {
@@ -136,7 +137,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 
 /** ---------- Connect: store creds + run the full test ---------- */
 app.post('/api/connect/test', async (req, res) => {
-  const { wpUrl, wpUser, wpAppPassword, claudeModel, allowPro, brandContext } = req.body || {};
+  const { wpUrl, wpUser, wpAppPassword, allowPro, brandContext } = req.body || {};
   if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: { code: 'ai_unavailable', message: 'AI generation is not configured on this server yet.' } });
   if (!wpUrl || !wpUser || !wpAppPassword) return res.status(400).json({ error: { code: 'missing_fields', message: 'WordPress URL, username and Application Password are required.' } });
   const creds = { wpUrl, wpUser, wpAppPassword };
@@ -145,7 +146,7 @@ app.post('/api/connect/test', async (req, res) => {
     if (result.wpReachable && result.authValid) {
       await new Promise((resolve, reject) => req.session.regenerate((err) => err ? reject(err) : resolve()));
       req.session.credsEncrypted = encryptJson(creds);
-      req.session.claudeModel = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-4-8'].includes(claudeModel) ? claudeModel : 'claude-haiku-5-5';
+      CLAUDE_MODEL = CLAUDE_MODEL;
       req.session.connected = result.pluginInstalled && result.elementorActive;
       req.session.allowPro = typeof allowPro === 'boolean' ? allowPro : !!result.elementorPro;
       req.session.imageMode = 'auto';
@@ -523,7 +524,7 @@ app.post('/api/components/suggest', async (req, res) => {
     if (!components.length) return res.json({ picks: [] });
 
     const { createClaudeClient } = require('./claudeClient');
-    const claude = createClaudeClient(claudeKey, req.session.claudeModel, { useCli });
+    const claude = createClaudeClient(claudeKey, CLAUDE_MODEL, { useCli });
     const raw = await claude.suggestComponents({ prompt: String(prompt).slice(0, 4000), components });
     let picks = [];
     try {
@@ -651,7 +652,7 @@ app.post('/api/suggest', async (req, res) => {
       return res.status(400).json({ error: { code: 'bad_request', message: 'pageJson is required.' } });
     }
     const { createClaudeClient } = require('./claudeClient');
-    const claude = createClaudeClient(claudeKey, req.session.claudeModel, { useCli });
+    const claude = createClaudeClient(claudeKey, CLAUDE_MODEL, { useCli });
     const raw = await claude.suggestImprovements({ pageJson, prompt: prompt || '' });
     let out = { suggestions: [] };
     try {
@@ -684,7 +685,7 @@ async function handleGenerate(req, res, isRefine) {
   try {
     creds = getCreds(req);
     claudeKey = process.env.ANTHROPIC_API_KEY;
-    claudeModel = req.session.claudeModel || 'claude-haiku-5-5';
+    claudeModel = CLAUDE_MODEL;
     claudeUseCli = false;
     if (!claudeKey) throw Object.assign(new Error('AI generation is not configured on this server.'), { status: 503, code: 'ai_unavailable' });
   } catch (err) {
