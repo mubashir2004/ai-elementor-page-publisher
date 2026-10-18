@@ -4,7 +4,8 @@
  * OWNER: Person 2 (skeleton) + Person 4 (generate/refine)
  *
  * Express app. All WordPress + Claude calls are server-side.
- * Credentials live in the session (memory store for v1).
+ * WordPress credentials are AES-256-GCM encrypted in the session store.
+ * AI provider credentials come only from server environment variables.
  *
  * ENV:
  *   PORT               default 8787
@@ -108,7 +109,9 @@ process.on('unhandledRejection', (err) => {
 function getCreds(req) {
   const s = req.session || {};
   if (s.credsEncrypted) {
-    try { return decryptJson(s.credsEncrypted); }
+    // Remove obsolete customer-supplied provider keys from older session files.
+    delete s.claudeKey; delete s.geminiKey; delete s.unsplashKey; delete s.claudeMode;
+    try { return decryptJson(s.credsEncrypted);
     catch (_) {
       const e = new Error('Saved WordPress credentials cannot be decrypted. Reconnect your site.');
       e.status = 401; e.code = 'credentials_unavailable'; throw e;
