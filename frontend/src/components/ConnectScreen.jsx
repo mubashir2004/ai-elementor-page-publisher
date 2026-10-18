@@ -159,41 +159,6 @@ export default function ConnectScreen({ onConnected }) {
 
       {allGreen && (
         <div className="post-test">
-          <label className="label">Widget mode</label>
-          <div className="seg">
-            <button
-              type="button"
-              className={!allowPro ? 'seg-btn active' : 'seg-btn'}
-              onClick={() => setAllowPro(false)}
-            >
-              Free widgets
-            </button>
-            <button
-              type="button"
-              className={allowPro ? 'seg-btn active' : 'seg-btn'}
-              onClick={() => setAllowPro(true)}
-              disabled={!result.elementorPro}
-              title={result.elementorPro ? '' : 'Elementor Pro not detected on this site'}
-            >
-              Free + Pro widgets
-            </button>
-          </div>
-          <p className="hint">
-            {result.elementorPro
-              ? 'Pro widgets (forms, nav menu, price tables, carousels…) are available on this site.'
-              : 'Elementor Pro was not detected — only free widgets can be used.'}
-          </p>
-
-
-          <label className="label">Brand context / guardrails (optional)</label>
-          <textarea
-            className="input textarea"
-            rows={3}
-            placeholder="e.g. We are a calm, premium wellness brand. Avoid loud colors. Use a warm, trustworthy tone."
-            value={brandContext}
-            onChange={(e) => setBrandContext(e.target.value)}
-          />
-
           <button className="primary continue" onClick={handleContinue}>
             Continue to Build →
           </button>
