@@ -147,13 +147,6 @@ export default function ConnectScreen({ onConnected }) {
         most closely. Switch any time by reconnecting — nothing else changes.
       </p>
 
-      {claudeMode === 'api' ? (
-        <>
-          
-
-      {/* Model is fixed internally to Claude Opus 4.8 — the strongest design
-          model. No user-facing selector (per product decision). */}
-
       {err && <div className="alert-error">{err}</div>}
 
       <button className="primary" onClick={handleTest} disabled={busy}>
