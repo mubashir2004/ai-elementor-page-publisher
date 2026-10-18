@@ -22,6 +22,7 @@ const session = require('express-session');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+const { encryptJson, decryptJson } = require('./credentialVault');
 
 const wpClient = require('./wpClient');
 const historyStore = require('./historyStore');
@@ -34,7 +35,6 @@ const { validateAndRepair } = require('./validator');
 const { BRAND_KITS, getBrandKit } = require('./brandKits');
 const { renderPage } = require('./previewRenderer');
 const { STARTER_BRIEFS } = require('./starterBriefs');
-const geminiImageClient = require('./geminiImageClient');
 const runStore = require('./runStore');
 
 const app = express();
@@ -45,12 +45,19 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 // at a single path (Railway: set EAI_DATA_DIR to the mount, e.g. /data).
 const DATA_DIR = process.env.EAI_DATA_DIR || path.join(__dirname, 'data');
 
+if (IS_PROD) {
+  for (const [name, value] of Object.entries({ SESSION_SECRET: process.env.SESSION_SECRET, CREDENTIAL_ENCRYPTION_KEY: process.env.CREDENTIAL_ENCRYPTION_KEY, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY })) {
+    if (!value || value.length < 32) throw new Error(`${name} must be configured in production and contain at least 32 characters.`);
+  }
+}
+
 // Behind Railway/Render/Fly the app sits behind a TLS proxy. Without this,
 // Express thinks the connection is plain HTTP and refuses to set secure
 // cookies — users could never stay logged in.
 if (IS_PROD) app.set('trust proxy', 1);
 
-app.use(express.json({ limit: '500mb' })); // effectively unlimited — images are client-optimized before upload
+app.disable('x-powered-by');
+app.use(express.json({ limit: '50mb' })); // Public service request size cap.
 // Accept the configured origin plus its localhost/127.0.0.1 twin — some
 // setups open the app via 127.0.0.1 and an exact-match string blocks them.
 app.use(cors({
@@ -73,7 +80,7 @@ app.use(session({
     reapInterval: 60 * 60,
     logFn: () => {},              // its chatter would drown the build logs
   }),
-  secret: process.env.SESSION_SECRET || 'dev-secret-change-me',
+  secret: process.env.SESSION_SECRET || (() => { if (IS_PROD) throw new Error('SESSION_SECRET is required in production.'); return 'dev-secret-change-me'; })(),
   resave: false,
   saveUninitialized: false,
   rolling: true,
@@ -97,15 +104,24 @@ process.on('unhandledRejection', (err) => {
   console.error('[fatal-guard] unhandled rejection:', (err && err.stack) || err);
 });
 
-/** Pull creds from session or throw a clean 401. */
+/** Decrypt the WordPress Application Password only in server memory. */
 function getCreds(req) {
-  const c = req.session && req.session.creds;
-  if (!c) {
-    const e = new Error('Not connected. Submit credentials first.');
-    e.status = 401;
-    throw e;
+  const s = req.session || {};
+  if (s.credsEncrypted) {
+    try { return decryptJson(s.credsEncrypted); }
+    catch (_) {
+      const e = new Error('Saved WordPress credentials cannot be decrypted. Reconnect your site.');
+      e.status = 401; e.code = 'credentials_unavailable'; throw e;
+    }
   }
-  return c;
+  // Migrate legacy sessions once; the next session write persists ciphertext only.
+  if (s.creds && s.creds.wpAppPassword) {
+    s.credsEncrypted = encryptJson(s.creds);
+    delete s.creds;
+    return decryptJson(s.credsEncrypted);
+  }
+  const e = new Error('Not connected. Connect your WordPress site first.');
+  e.status = 401; throw e;
 }
 
 /** ---------- Health ---------- */
@@ -113,43 +129,20 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 
 /** ---------- Connect: store creds + run the full test ---------- */
 app.post('/api/connect/test', async (req, res) => {
-  const {
-    wpUrl, wpUser, wpAppPassword, claudeKey, claudeModel, claudeMode,
-    allowPro, unsplashKey, geminiKey, brandContext,
-  } = req.body || {};
-  // Claude access: 'api' (key required) or 'cli' (local Claude Code login —
-  // no key). CLI availability is probed and reported in the checklist.
-  const mode = claudeMode === 'cli' ? 'cli' : 'api';
-  if (!wpUrl || !wpUser || !wpAppPassword || (mode === 'api' && !claudeKey)) {
-    return res.status(400).json({ error: { code: 'missing_fields', message: 'All credential fields are required.' } });
-  }
-
+  const { wpUrl, wpUser, wpAppPassword, claudeModel, allowPro, brandContext } = req.body || {};
+  if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: { code: 'ai_unavailable', message: 'AI generation is not configured on this server yet.' } });
+  if (!wpUrl || !wpUser || !wpAppPassword) return res.status(400).json({ error: { code: 'missing_fields', message: 'WordPress URL, username and Application Password are required.' } });
   const creds = { wpUrl, wpUser, wpAppPassword };
   try {
     const result = await wpClient.connectionTest(creds);
-    if (mode === 'cli') {
-      const cli = await require('./claudeCliClient').isAvailable();
-      result.claudeCli = cli.ok;
-      result.claudeCliVersion = cli.version || '';
-      result.messages = result.messages || {};
-      if (!cli.ok) {
-        result.messages.claudeCli =
-          `Claude CLI not found or not working (${cli.error}). Install Claude Code ` +
-          '(npm install -g @anthropic-ai/claude-code) and sign in by running `claude` once.';
-      }
-    }
-    // Persist only if the site is reachable and auth is valid.
     if (result.wpReachable && result.authValid) {
-      req.session.creds = creds;
-      req.session.claudeMode = mode;
-      req.session.claudeKey = mode === 'cli' ? '' : claudeKey;
-      req.session.claudeModel = claudeModel || undefined;
+      await new Promise((resolve, reject) => req.session.regenerate((err) => err ? reject(err) : resolve()));
+      req.session.credsEncrypted = encryptJson(creds);
+      req.session.claudeModel = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-4-8'].includes(claudeModel) ? claudeModel : 'claude-haiku-5-5';
       req.session.connected = result.pluginInstalled && result.elementorActive;
-      // v2 advanced options — default allowPro to whether Pro is active.
       req.session.allowPro = typeof allowPro === 'boolean' ? allowPro : !!result.elementorPro;
-      req.session.unsplashKey = typeof unsplashKey === 'string' ? unsplashKey : '';
-      req.session.geminiKey = typeof geminiKey === 'string' ? geminiKey : '';
-      req.session.brandContext = typeof brandContext === 'string' ? brandContext : '';
+      req.session.imageMode = 'auto';
+      req.session.brandContext = typeof brandContext === 'string' ? brandContext.slice(0, 5000) : '';
     }
     return res.json(result);
   } catch (err) {
@@ -166,18 +159,16 @@ app.post('/api/connect/test', async (req, res) => {
  */
 app.get('/api/session', (req, res) => {
   const s = req.session || {};
-  const creds = s.creds;
-  if (!creds) return res.json({ connected: false });
+  let creds;
+  try { creds = getCreds(req); } catch (_) { return res.json({ connected: false }); }
   res.json({
     connected: true,
     wpUrl: creds.wpUrl,
     wpUser: creds.wpUser,
-    claudeMode: s.claudeMode || 'api',
+    aiProvider: 'platform',
     allowPro: !!s.allowPro,
     elementorPro: !!s.allowPro,
     brandContext: s.brandContext || '',
-    hasClaudeKey: !!s.claudeKey || s.claudeMode === 'cli',
-    hasGeminiKey: !!s.geminiKey,
   });
 });
 
@@ -514,9 +505,9 @@ app.get('/api/pro-usage', async (req, res) => {
 app.post('/api/components/suggest', async (req, res) => {
   try {
     const creds = getCreds(req);
-    const claudeKey = req.session.claudeKey;
-    const useCli = req.session.claudeMode === 'cli';
-    if (!claudeKey && !useCli) return res.status(401).json({ error: { code: 'not_connected', message: 'Missing Claude API key.' } });
+    const claudeKey = process.env.ANTHROPIC_API_KEY;
+    const useCli = false;
+    if (!claudeKey) return res.status(503).json({ error: { code: 'ai_unavailable', message: 'AI generation is not configured on this server.' } });
     const prompt = (req.body && req.body.prompt) || '';
     if (!String(prompt).trim()) {
       return res.status(400).json({ error: { code: 'bad_request', message: 'prompt is required.' } });
@@ -645,9 +636,9 @@ app.post('/api/republish', async (req, res) => {
 app.post('/api/suggest', async (req, res) => {
   try {
     getCreds(req);
-    const claudeKey = req.session.claudeKey;
-    const useCli = req.session.claudeMode === 'cli';
-    if (!claudeKey && !useCli) return res.status(401).json({ error: { code: 'not_connected', message: 'Missing Claude API key.' } });
+    const claudeKey = process.env.ANTHROPIC_API_KEY;
+    const useCli = false;
+    if (!claudeKey) return res.status(503).json({ error: { code: 'ai_unavailable', message: 'AI generation is not configured on this server.' } });
     const { pageJson, prompt } = req.body || {};
     if (!pageJson || typeof pageJson !== 'object') {
       return res.status(400).json({ error: { code: 'bad_request', message: 'pageJson is required.' } });
@@ -672,39 +663,6 @@ app.post('/api/suggest', async (req, res) => {
 });
 
 /** ---------- Generate (SSE progress stream) ---------- */
-/**
- * POST /api/gemini/test — run ONE tiny real image generation so the user can
- * verify their Gemini key works BEFORE building a page. Returns the generated
- * image as a data URL for an instant visual preview.
- */
-app.post('/api/gemini/test', async (req, res) => {
-  const body = req.body || {};
-  const key = (typeof body.geminiKey === 'string' ? body.geminiKey.trim() : '') ||
-    req.session.geminiKey || '';
-  if (!key) {
-    return res.status(400).json({ ok: false, error: 'No Gemini API key provided.' });
-  }
-  try {
-    const img = await geminiImageClient.generateImage(
-      'a single fresh green apple on a clean white studio background', key);
-    if (img && img.buffer && img.buffer.length) {
-      req.session.geminiKey = key; // a proven key becomes the session default
-      return res.json({
-        ok: true,
-        bytes: img.buffer.length,
-        mime: img.mime,
-        preview: `data:${img.mime};base64,${img.buffer.toString('base64')}`,
-      });
-    }
-    return res.json({
-      ok: false,
-      error: 'The API returned no image — the key may be invalid, out of quota, or image generation may be unavailable for it.',
-    });
-  } catch (e) {
-    return res.json({ ok: false, error: `Test failed: ${(e && e.message) || 'unknown error'}` });
-  }
-});
-
 app.post('/api/generate', async (req, res) => {
   await handleGenerate(req, res, false);
 });
@@ -718,10 +676,10 @@ async function handleGenerate(req, res, isRefine) {
   let creds, claudeKey, claudeModel, claudeUseCli;
   try {
     creds = getCreds(req);
-    claudeKey = req.session.claudeKey;
-    claudeModel = req.session.claudeModel;
-    claudeUseCli = req.session.claudeMode === 'cli';
-    if (!claudeKey && !claudeUseCli) throw Object.assign(new Error('Missing Claude API key.'), { status: 401 });
+    claudeKey = process.env.ANTHROPIC_API_KEY;
+    claudeModel = req.session.claudeModel || 'claude-haiku-5-5';
+    claudeUseCli = false;
+    if (!claudeKey) throw Object.assign(new Error('AI generation is not configured on this server.'), { status: 503, code: 'ai_unavailable' });
   } catch (err) {
     return res.status(err.status || 401).json({ error: { code: 'not_connected', message: err.message } });
   }
@@ -795,18 +753,12 @@ async function handleGenerate(req, res, isRefine) {
   const unsplashKey = nonEmpty(body.unsplashKey)
     ? body.unsplashKey
     : (req.session.unsplashKey || '');
-  const imageMode = nonEmpty(body.imageMode)
-    ? body.imageMode
-    : (req.session.imageMode || 'auto');
-  const geminiKey = nonEmpty(body.geminiKey)
-    ? body.geminiKey
-    : (req.session.geminiKey || '');
+  const imageMode = 'auto'; // Stock image selection only on the public instance.
+  const geminiKey = ''; // Public service uses stock imagery only; no customer Gemini keys.
 
   // Remember explicitly-chosen values so a later /api/refine (which often
   // sends a minimal body) inherits them via the session fallback above.
-  if (nonEmpty(body.imageMode)) req.session.imageMode = body.imageMode;
-  if (nonEmpty(body.unsplashKey)) req.session.unsplashKey = body.unsplashKey;
-  if (nonEmpty(body.geminiKey)) req.session.geminiKey = body.geminiKey;
+  req.session.imageMode = 'auto';
   if (nonEmpty(body.brandContext)) req.session.brandContext = body.brandContext;
 
   // Elementor globals as the brand kit (opt-in). Best-effort: on any
