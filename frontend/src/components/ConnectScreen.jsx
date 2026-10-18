@@ -49,7 +49,6 @@ export default function ConnectScreen({ onConnected }) {
       .catch(() => {});
     return () => { alive = false; };
   }, []);
-  const [claudeMode, setClaudeMode] = useState('api'); // 'api' | 'cli'
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -97,7 +96,7 @@ export default function ConnectScreen({ onConnected }) {
   return (
     <div className="card">
       <h1 className="title">Connect your site</h1>
-            <p className="subtitle">Connect your WordPress site. AI generation runs securely using this service's server-side provider configuration.</p>
+      <p className="subtitle">Connect your WordPress site. AI generation uses this service’s server-side configuration. Your WordPress Application Password is encrypted before it is saved.</p>
 
       {/* Step 1: install the companion plugin on the WordPress site. */}
       <div className="plugin-step">
@@ -139,7 +138,7 @@ export default function ConnectScreen({ onConnected }) {
       </div>
       <p className="hint">WordPress Admin → Users → Profile → Application Passwords → add new.</p>
 
-            <label className="label">Claude model</label>
+      <label className="label">AI model</label>
       <select className="input" value={form.claudeModel} onChange={set('claudeModel')}>
         {MODELS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
       </select>
@@ -177,18 +176,6 @@ export default function ConnectScreen({ onConnected }) {
               </div>
             );
           })}
-          {claudeMode === 'cli' && 'claudeCli' in result && (
-            <div className={`check ${result.claudeCli ? 'ok' : 'bad'}`}>
-              <span className="dot">{result.claudeCli ? '✓' : '✕'}</span>
-              <span className="check-label">Claude CLI ready</span>
-              {result.claudeCli && result.claudeCliVersion && (
-                <span className="ver">{result.claudeCliVersion}</span>
-              )}
-              {!result.claudeCli && (
-                <span className="fix">{(result.messages && result.messages.claudeCli) || 'Install Claude Code and sign in, then re-test.'}</span>
-              )}
-            </div>
-          )}
         </div>
       )}
 
