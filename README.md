@@ -99,7 +99,7 @@ Render's **free tier cannot run this app** — 512 MB RAM (Chromium and image
 processing need more), no persistent disk, and it sleeps when idle. Use a paid
 instance with a disk attached.
 
-**Public deployment and costs.** Visitors connect with their WordPress URL, username and Application Password only. The platform's `ANTHROPIC_API_KEY` pays for every AI operation. This setup intentionally has no customer accounts or per-customer usage quotas, so anonymous visitors can consume your API budget. That is a real financial risk: do not expose the service publicly until you accept it and set provider-level billing alerts. Gemini image generation and customer-supplied image API keys are disabled; the UI uses stock images.
+**Public deployment defaults.** The public Connect screen asks only for the WordPress URL, username and Application Password. Claude Haiku 5.5 is fixed server-side; there is no customer model selector or local Claude CLI mode. Visitors do not need accounts or their own AI keys. Stock imagery is used. The platform's `ANTHROPIC_API_KEY` pays for every AI operation. This setup intentionally has no customer accounts or per-customer usage quotas, so anonymous visitors can consume your API budget. That is a real financial risk: set provider-level billing alerts and accept that exposure before making the service public. Gemini image generation and customer-supplied image API keys are disabled.
 
 **Not Vercel/Netlify.** A page build runs 10–25 minutes on a live SSE stream;
 serverless functions cap out long before that, have no persistent disk for
