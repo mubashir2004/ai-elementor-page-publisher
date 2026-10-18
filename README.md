@@ -111,8 +111,8 @@ long-lived container.
 ```bash
 docker build -t eai-publisher .
 docker run -p 8787:8787 -v eai-data:/data \
-  -e SESSION_SECRET=replace-with-32-plus-random-characters \\
-  -e CREDENTIAL_ENCRYPTION_KEY=$(openssl rand -hex 32) \\
+  -e SESSION_SECRET=replace-with-32-plus-random-characters \
+  -e CREDENTIAL_ENCRYPTION_KEY=$(openssl rand -hex 32) \
   -e ANTHROPIC_API_KEY=your-server-side-key eai-publisher
 # open http://localhost:8787
 ```
