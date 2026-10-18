@@ -34,7 +34,7 @@ WORKDIR /app
 
 # Backend deps first so this layer caches across code changes.
 COPY backend/package.json backend/package-lock.json ./backend/
-RUN cd backend && npm ci --omit=dev
+RUN cd backend && npm install --omit=dev
 
 # Application code. The backend resolves ../prompts and ../plugin relative to
 # itself, so this layout must be preserved.
