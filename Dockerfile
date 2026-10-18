@@ -48,9 +48,13 @@ COPY --from=frontend /app/frontend/dist ./frontend/dist
 # Page history, sessions, brands and components live here. Mount a volume at
 # /data on the host/platform or everything resets on each redeploy.
 RUN mkdir -p /data && chown -R pwuser:pwuser /data /app
-USER pwuser
+COPY start.sh /app/start.sh
+RUN chmod 755 /app/start.sh
+# Start as root only long enough to fix ownership of the runtime-mounted
+# volume; start.sh then drops privileges to pwuser before launching Node.
+USER root
 
 EXPOSE 8787
 
 # Platform health checks hit /health, which needs no credentials.
-CMD ["node", "backend/server.js"]
+CMD ["/app/start.sh"]
